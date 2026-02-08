@@ -11,33 +11,38 @@ import (
 	"github.com/segmentio/kafka-go"
 )
 
-// OutboxWorkerConfig defines configuration for OutboxWorker.
+// OutboxWorkerConfig configures OutboxWorker behavior.
 type OutboxWorkerConfig struct {
-	// MaxRutin defines maximum number of parallel routines for sending events.
-	// If 0, it will be set to 1.
+	// MaxRutin is the maximum number of parallel send loops.
+	// If 0, it defaults to 1.
 	MaxRutin uint
 
-	// MinSleep defines minimum sleep time between ticks. It will be used when there are no events to send.
+	// MinSleep is the minimum delay between iterations when there are few/no events.
 	MinSleep time.Duration
-	// MaxSleep defines maximum sleep time between ticks. It will be used when there are no events to send for a long time.
+	// MaxSleep is the maximum delay between iterations during long idle periods.
 	MaxSleep time.Duration
 
-	// MinButchSize defines minimum number of events to reserve for sending in one tick.
+	// MinButchSize is the minimum number of events reserved per batch.
 	MinButchSize uint
-	// MaxButchSize defines maximum number of events to reserve for sending in one tick.
+	// MaxButchSize is the maximum number of events reserved per batch.
+	// If 0, it defaults to 100.
 	MaxButchSize uint
 }
 
+// OutboxWorker reads pending events from outbox storage and publishes them to Kafka.
+// It uses at-least-once delivery semantics: duplicates are possible and must be handled by consumers.
 type OutboxWorker struct {
 	log    *logium.Logger
 	config OutboxWorkerConfig
 
-	//box realization of outbox
+	// box provides outbox storage operations (reserve/commit/delay/cleanup).
 	box outbox
 
+	// writer publishes messages to Kafka.
 	writer *kafka.Writer
 }
 
+// NewOutboxWorker creates a new OutboxWorker.
 func NewOutboxWorker(
 	log *logium.Logger,
 	cfg OutboxWorkerConfig,
@@ -67,13 +72,15 @@ type outboxWorkerRes struct {
 	reason string
 }
 
-// Run starts the worker loop. It will run until the context is cancelled.
-// also here transferring the ID, so the worker can clean up only its own events in case of shutdown or restart.
-// Below is an explanation of how it works.
-// So first we create a channel for jobs and results,
-// after that for each routine (up to MaxRutin) we start a goroutine that listens channel eith jobs,
-// and for each job tru to send event to kafka, and then send result to results channel.
-// so after that send the result of success or failure to the results channel
+// Run starts the worker loop and blocks until ctx is cancelled.
+//
+// Flow:
+//  1. Start MaxRutin send loops reading jobs from a channel.
+//  2. In a loop: reserve a batch of pending events, send them, then commit or delay.
+//  3. On exit: attempts to release events reserved by this worker ( the best effort).
+//
+// The worker does not guarantee exactly-once delivery.
+// Consumers must be idempotent.
 func (w *OutboxWorker) Run(ctx context.Context, id string) {
 	defer func() {
 		if err := w.CleanOwnProcessingEvents(context.Background(), id); err != nil {
@@ -89,6 +96,7 @@ func (w *OutboxWorker) Run(ctx context.Context, id string) {
 		maxParallel = 1
 	}
 
+	// create to channels for sending jobs to send loops and receiving results back from them
 	jobs := make(chan outboxWorkerJob, maxParallel)
 	results := make(chan outboxWorkerRes, maxParallel)
 
@@ -96,7 +104,9 @@ func (w *OutboxWorker) Run(ctx context.Context, id string) {
 	wg.Add(maxParallel)
 
 	for i := 0; i < maxParallel; i++ {
-		go w.jober(ctx, &wg, jobs, results)
+		// start send loops that will read reserved events from jobs channel,
+		// publish them to Kafka and report results back to results channel
+		go w.sendLoop(ctx, &wg, jobs, results)
 	}
 
 	defer func() {
@@ -110,7 +120,9 @@ func (w *OutboxWorker) Run(ctx context.Context, id string) {
 			return
 		}
 
-		numEvents := w.tick(ctx, id, butchSize, jobs, results)
+		// reserve a batch of pending events for this worker, send them via send loops,
+		// and then commit (sent) or delay (retry later) each event
+		numEvents := w.processBatch(ctx, id, butchSize, jobs, results)
 
 		butchSize = w.calculateBatch(numEvents)
 		sleep = w.calculateSleep(numEvents, sleep)
@@ -123,7 +135,8 @@ func (w *OutboxWorker) Run(ctx context.Context, id string) {
 	}
 }
 
-func (w *OutboxWorker) jober(
+// sendLoop reads reserved events from jobs channel, publishes them to Kafka and reports results.
+func (w *OutboxWorker) sendLoop(
 	ctx context.Context,
 	wg *sync.WaitGroup,
 	jobs <-chan outboxWorkerJob,
@@ -131,6 +144,7 @@ func (w *OutboxWorker) jober(
 ) {
 	defer wg.Done()
 
+	// read jobs until the channel is closed or context is cancelled
 	for job := range jobs {
 		if ctx.Err() != nil {
 			return
@@ -138,11 +152,14 @@ func (w *OutboxWorker) jober(
 
 		ev := job.ev
 		msg := ev.ToKafkaMessage()
+
+		// try to send message to kafka topic
 		sendErr := w.writer.WriteMessages(ctx, msg)
 		now := time.Now().UTC()
 
 		if sendErr != nil {
 			w.log.WithError(sendErr).Errorf("failed to send event id=%s", ev.EventID)
+			// if sending failed, report error back to results channel, so event will be delayed for future processing
 			results <- outboxWorkerRes{
 				id:     ev.EventID,
 				now:    now,
@@ -152,18 +169,22 @@ func (w *OutboxWorker) jober(
 			continue
 		}
 
+		// if sending succeeded, report success back to results channel, so event will be committed as sent
 		w.log.Debugf("sent event id=%s", ev.EventID)
 		results <- outboxWorkerRes{id: ev.EventID, now: now}
 	}
 }
 
-func (w *OutboxWorker) tick(
+// processBatch reserves up to batchSize pending events for this worker,
+// sends them via send loops, and then commits (sent) or delays (retry later) each event.
+func (w *OutboxWorker) processBatch(
 	ctx context.Context,
 	id string,
 	butchSize uint,
 	jobs chan<- outboxWorkerJob,
 	results <-chan outboxWorkerRes,
 ) uint {
+	// reserve a batch of pending events for this worker
 	events, err := w.box.ReserveOutboxEvents(ctx, id, butchSize)
 	if err != nil {
 		w.log.WithError(err).Error("failed to reserve events")
@@ -177,6 +198,8 @@ func (w *OutboxWorker) tick(
 		select {
 		case <-ctx.Done():
 			return uint(len(events))
+			// send reserved events to send loops via jobs channel, so
+			// they will be processed and then committed or delayed
 		case jobs <- outboxWorkerJob{ev: ev}:
 		}
 	}
@@ -201,12 +224,14 @@ func (w *OutboxWorker) tick(
 	}
 
 	if len(commit) > 0 {
+		// if sending succeeded, commit events as sent, so they won't be processed again
 		if err := w.box.CommitOutboxEvents(ctx, id, commit); err != nil {
 			w.log.WithError(err).Error("failed to mark events as sent")
 		}
 	}
 
 	if len(pending) > 0 {
+		// if sending failed, delay events for future processing, so they will be retried later
 		if err := w.box.DelayOutboxEvents(ctx, id, pending); err != nil {
 			w.log.WithError(err).Error("failed to delay events")
 		}
@@ -215,6 +240,7 @@ func (w *OutboxWorker) tick(
 	return uint(len(events))
 }
 
+// calculateBatch adjusts the next batch size based on how many events were processed last time.
 func (w *OutboxWorker) calculateBatch(
 	numEvents uint,
 ) uint {
@@ -244,6 +270,7 @@ func (w *OutboxWorker) calculateBatch(
 	return batch
 }
 
+// calculateSleep adjusts the delay before the next iteration based on how many events were processed.
 func (w *OutboxWorker) calculateSleep(
 	numEvents uint,
 	lastSleep time.Duration,
@@ -289,6 +316,7 @@ func (w *OutboxWorker) calculateSleep(
 	return sleep
 }
 
+// CleanOwnFailedEvents moves failed events reserved by this worker back to pending.
 func (w *OutboxWorker) CleanOwnFailedEvents(
 	ctx context.Context,
 	id string,
@@ -296,6 +324,7 @@ func (w *OutboxWorker) CleanOwnFailedEvents(
 	return w.box.CleanFailedOutboxEventForWorker(ctx, id)
 }
 
+// CleanOwnProcessingEvents releases processing events reserved by this worker back to pending.
 func (w *OutboxWorker) CleanOwnProcessingEvents(
 	ctx context.Context,
 	id string,
@@ -303,6 +332,9 @@ func (w *OutboxWorker) CleanOwnProcessingEvents(
 	return w.box.CleanProcessingOutboxEventForWorker(ctx, id)
 }
 
+// Shutdown closes Kafka writer and performs a best-effort cleanup.
+// Note: CleanProcessingOutboxEvent affects all processing events, not only this worker.
+// Use with caution in multi-worker setups.
 func (w *OutboxWorker) Shutdown(ctx context.Context) error {
 	var errs []error
 
