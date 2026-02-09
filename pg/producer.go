@@ -12,20 +12,17 @@ import (
 )
 
 type producer struct {
-	id     string
 	log    *logium.Logger
 	writer *kafka.Writer
 	outbox outbox
 }
 
 func NewProducer(
-	id string,
 	log *logium.Logger,
 	writer *kafka.Writer,
 	outbox outbox,
 ) msnger.Producer {
 	p := &producer{
-		id:     id,
 		log:    log,
 		writer: writer,
 		outbox: outbox,
@@ -67,11 +64,6 @@ func (p *producer) Shutdown(ctx context.Context) error {
 	if err := p.writer.Close(); err != nil {
 		p.log.WithError(err).Error("failed to close kafka writer")
 		errs = append(errs, fmt.Errorf("failed to close kafka writer: %w", err))
-	}
-
-	if err := p.outbox.CleanProcessingOutboxEventForWorker(ctx, p.id); err != nil {
-		p.log.WithError(err).Error("failed to clean processing outbox events for producer")
-		errs = append(errs, fmt.Errorf("failed to clean processing outbox events for producer: %w", err))
 	}
 
 	return errors.Join(errs...)
