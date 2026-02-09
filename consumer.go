@@ -9,8 +9,6 @@ import (
 type InHandlerFunc func(ctx context.Context, msg kafka.Message) error
 
 type Consumer interface {
-	Run(ctx context.Context)
+	Run(ctx context.Context, cfg kafka.ReaderConfig)
 	Shutdown(ctx context.Context) error
-
-	Route(eventType string, handler InHandlerFunc)
 }

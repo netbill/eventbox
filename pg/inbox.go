@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/netbill/ape"
 	"github.com/netbill/msnger/headers"
 	"github.com/segmentio/kafka-go"
 )
@@ -76,6 +77,10 @@ func (e *InboxEvent) ToKafkaMessage() kafka.Message {
 		},
 	}
 }
+
+var (
+	ErrInboxEventAlreadyExists = ape.DeclareError("INBOX_EVENT_ALREADY_EXISTS")
+)
 
 type inbox interface {
 	// WriteInboxEvent writes new event to inbox, fields "event_id", "type", "version", "producer"

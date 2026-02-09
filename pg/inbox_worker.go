@@ -25,6 +25,7 @@ const (
 	DefaultInboxWorkerMaxNextAttempt = 10 * time.Minute
 )
 
+// InboxWorkerConfig defines configuration for InboxWorker.
 type InboxWorkerConfig struct {
 	// MaxRutin is the maximum number of parallel handle loops.
 	// If 0, it defaults to DefaultInboxWorkerMaxRutin.
@@ -69,7 +70,7 @@ type InboxWorker struct {
 }
 
 // NewInboxWorker creates a new InboxWorker.
-func NewInboxWorker(log *logium.Logger, box inbox, config InboxWorkerConfig) *InboxWorker {
+func NewInboxWorker(log *logium.Logger, box inbox, config InboxWorkerConfig) msnger.InboxWorker {
 	if config.MaxRutin <= 0 {
 		config.MaxRutin = DefaultInboxWorkerMaxRutin
 	}
