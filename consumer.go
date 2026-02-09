@@ -7,6 +7,5 @@ import (
 )
 
 type Consumer interface {
-	Run(ctx context.Context, cfg kafka.ReaderConfig)
-	Shutdown(ctx context.Context) error
+	StartReading(ctx context.Context, cfg kafka.ReaderConfig)
 }

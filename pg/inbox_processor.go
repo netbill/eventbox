@@ -415,6 +415,7 @@ func (w *InboxProcessor) StopProcess(ctx context.Context, processID string) erro
 // WARNING:
 //   - This is a maintenance operation and may affect events reserved by other processes,
 //     depending on storage implementation.
+//
 // Prefer CleanInboxProcessingForProcessID when you need to clean only one process.
 func (w *InboxProcessor) CleanInboxProcessing(ctx context.Context) error {
 	err := w.box.CleanProcessingInboxEvent(ctx)
@@ -440,6 +441,7 @@ func (w *InboxProcessor) CleanInboxProcessingForProcessID(ctx context.Context, p
 // WARNING:
 //   - This is a maintenance operation and may affect events reserved by other processes,
 //     depending on storage implementation.
+//
 // Prefer CleanInboxFailedForProcessID when you need to clean only one process.
 func (w *InboxProcessor) CleanInboxFailed(ctx context.Context) error {
 	err := w.box.CleanFailedInboxEvent(ctx)

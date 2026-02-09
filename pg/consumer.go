@@ -54,10 +54,10 @@ func NewConsumer(
 	}
 }
 
-// Run starts the consumer loop, which continuously fetches messages from the Kafka topic,
+// StartReading starts the consumer loop, which continuously fetches messages from the Kafka topic,
 // writes them to the inbox, and commits the messages. It handles errors with an exponential backoff strategy.
 // The loop will exit when the context is canceled.
-func (c *Consumer) Run(
+func (c *Consumer) StartReading(
 	ctx context.Context,
 	readerConfig kafka.ReaderConfig,
 ) {
@@ -191,11 +191,4 @@ func (c *Consumer) backoffOrStop(ctx context.Context, backoff *time.Duration) bo
 	}
 	*backoff = next
 	return true
-}
-
-// Shutdown is a hook for future resource cleanup.
-// The consumer stops when the provided context is canceled, so currently Shutdown is a no-op.
-// It is kept for API symmetry and future extensions (e.g., metrics, tracing, additional connections).
-func (c *Consumer) Shutdown(ctx context.Context) error {
-	return nil
 }
