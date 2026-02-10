@@ -441,15 +441,3 @@ func (w *OutboxProcessor) CleanOutboxFailed(ctx context.Context) error {
 
 	return nil
 }
-
-// CleanOutboxFailedForProcessID performs storage-level cleanup of failed events
-// associated with the specified processID.
-func (w *OutboxProcessor) CleanOutboxFailedForProcessID(ctx context.Context, id string) error {
-	err := w.box.CleanFailedOutboxEventForProcessor(ctx, id)
-	if err != nil {
-		w.log.WithError(err).Error("failed to clean failed events for processor")
-		return err
-	}
-
-	return nil
-}

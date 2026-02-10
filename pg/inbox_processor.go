@@ -314,7 +314,7 @@ func (w *InboxProcessor) handleLoop(
 
 					return nil
 				default:
-					ev, err = w.box.DelayInboxEvent(ctx, processID, ev.EventID, w.nextAttemptAt(ev.Attempts), hErr.Error())
+					ev, err = w.box.DelayInboxEvent(ctx, processID, ev.EventID, hErr.Error(), w.nextAttemptAt(ev.Attempts))
 					if err != nil {
 						return fmt.Errorf("failed to delay inbox event id=%s: %w", ev.EventID, err)
 					}
@@ -403,7 +403,7 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 // StopProcess does not stop goroutines started by StartProcess.
 // Stopping is controlled via ctx cancellation passed to StartProcess.
 func (w *InboxProcessor) StopProcess(ctx context.Context, processID string) error {
-	err := w.box.CleanFailedInboxEventForProcessor(ctx, processID)
+	err := w.box.CleanProcessingInboxEventForProcessor(ctx, processID)
 	if err != nil {
 		w.log.WithError(err).Errorf("failed to clean own failed events for processID=%s", processID)
 	}
@@ -418,7 +418,7 @@ func (w *InboxProcessor) StopProcess(ctx context.Context, processID string) erro
 //
 // Prefer CleanInboxProcessingForProcessID when you need to clean only one process.
 func (w *InboxProcessor) CleanInboxProcessing(ctx context.Context) error {
-	err := w.box.CleanProcessingInboxEvent(ctx)
+	err := w.box.CleanProcessingInboxEvents(ctx)
 	if err != nil {
 		w.log.WithError(err).Error("failed to clean processing events")
 	}
@@ -444,19 +444,9 @@ func (w *InboxProcessor) CleanInboxProcessingForProcessID(ctx context.Context, p
 //
 // Prefer CleanInboxFailedForProcessID when you need to clean only one process.
 func (w *InboxProcessor) CleanInboxFailed(ctx context.Context) error {
-	err := w.box.CleanFailedInboxEvent(ctx)
+	err := w.box.CleanFailedInboxEvents(ctx)
 	if err != nil {
 		w.log.WithError(err).Error("failed to clean failed events")
-	}
-
-	return err
-}
-
-// CleanInboxFailedForProcessID performs storage-level cleanup of failed events for the given processID.
-func (w *InboxProcessor) CleanInboxFailedForProcessID(ctx context.Context, processID string) error {
-	err := w.box.CleanFailedInboxEventForProcessor(ctx, processID)
-	if err != nil {
-		w.log.WithError(err).Errorf("failed to clean failed events for processID=%s", processID)
 	}
 
 	return err

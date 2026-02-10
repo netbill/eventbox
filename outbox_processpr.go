@@ -14,5 +14,4 @@ type OutboxMaintenance interface {
 	CleanOutboxProcessingForProcessID(ctx context.Context, processID string) error
 
 	CleanOutboxFailed(ctx context.Context) error
-	CleanOutboxFailedForProcessID(ctx context.Context, processID string) error
 }

@@ -5,12 +5,19 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/netbill/ape"
 	"github.com/netbill/msnger"
 	"github.com/segmentio/kafka-go"
 )
 
+var (
+	ErrOutboxEventAlreadyExists = ape.DeclareError("OUTBOX_EVENT_ALREADY_EXISTS")
+	ErrOutboxEventNotFound      = ape.DeclareError("OUTBOX_EVENT_NOT_FOUND")
+)
+
 type DelayOutboxEventData struct {
 	NextAttemptAt time.Time // this data for field "next_attempt_at" in outbox_events table
+	LastAttemptAt time.Time // this data for field "last_attempt_at" in outbox_events table
 	Reason        string    // this data for field "last_error" in outbox_events table
 }
 
@@ -30,26 +37,6 @@ type outbox interface {
 		ctx context.Context,
 		message kafka.Message,
 	) (msnger.OutboxEvent, error)
-
-	// WriteAndReserveOutboxEvent writes new event to outbox and reserves it for processing.
-	// This method is similar to WriteOutboxEvent, but also sets:
-	// - "status"      to msnger.OutboxEventStatusProcessing
-	// - "reserved_by" to processID
-	//
-	// If event already exists and:
-	// - "status"      is msnger.OutboxEventStatusPending
-	// - "reserved_by" IS NULL
-	// this method reserves existing event for processing by updating:
-	// - "status"      to msnger.OutboxEventStatusProcessing
-	// - "reserved_by" to processID
-	// and returns reserved = true.
-	//
-	// Otherwise this method does not reserve event and returns reserved = false with existing event.
-	WriteAndReserveOutboxEvent(
-		ctx context.Context,
-		message kafka.Message,
-		processID string,
-	) (msnger.OutboxEvent, bool, error)
 
 	// GetOutboxEventByID retrieves event by ID.
 	// Returns typed error if event not found.
@@ -86,16 +73,6 @@ type outbox interface {
 		events map[uuid.UUID]CommitOutboxEventParams,
 	) error
 
-	// CommitOutboxEvent marks event as sent.
-	// This method does the same thing as CommitOutboxEvents, but for one event.
-	// Returns updated event.
-	CommitOutboxEvent(
-		ctx context.Context,
-		eventID uuid.UUID,
-		processID string,
-		data CommitOutboxEventParams,
-	) (msnger.OutboxEvent, error)
-
 	// DelayOutboxEvents delays events for future processing.
 	// This method updates events with ids from "events" map and sets:
 	// - "status"          to msnger.OutboxEventStatusPending
@@ -112,15 +89,6 @@ type outbox interface {
 		ctx context.Context,
 		processID string,
 		events map[uuid.UUID]DelayOutboxEventData,
-	) error
-
-	// DelayOutboxEvent delays event processing.
-	// This method does the same thing as DelayOutboxEvents, but for one event.
-	DelayOutboxEvent(
-		ctx context.Context,
-		processID string,
-		eventID uuid.UUID,
-		data DelayOutboxEventData,
 	) error
 
 	// CleanProcessingOutboxEvent cleans events with "status" msnger.OutboxEventStatusProcessing.
@@ -140,8 +108,4 @@ type outbox interface {
 	// - clears "reserved_by"
 	// - sets "next_attempt_at" to current time
 	CleanFailedOutboxEvent(ctx context.Context) error
-
-	// CleanFailedOutboxEventForProcessor is similar to CleanFailedOutboxEvent,
-	// but only for events with "reserved_by" equal to processID.
-	CleanFailedOutboxEventForProcessor(ctx context.Context, processID string) error
 }

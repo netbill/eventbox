@@ -30,22 +30,12 @@ type inbox interface {
 		message kafka.Message,
 	) (msnger.InboxEvent, error)
 
-	// WriteAndReserveInboxEvent writes new event to inbox and reserves it for processing.
-	// This method is similar to WriteInboxEvent, but also sets:
-	// - "reserved_by" to processID
-	// - "status"      to msnger.InboxEventStatusProcessing
-	//
-	// Reservation is possible only if event does not exist.
-	// Returns typed error if event already exists or reservation is not possible.
-	WriteAndReserveInboxEvent(
-		ctx context.Context,
-		message kafka.Message,
-		processID string,
-	) (msnger.InboxEvent, error)
-
 	// GetInboxEventByID retrieves event by ID.
 	// Returns typed error if event not found.
-	GetInboxEventByID(ctx context.Context, id uuid.UUID) (msnger.InboxEvent, error)
+	GetInboxEventByID(
+		ctx context.Context,
+		id uuid.UUID,
+	) (msnger.InboxEvent, error)
 
 	// ReserveInboxEvents reserves events for processing.
 	// This method selects events with:
@@ -89,8 +79,8 @@ type inbox interface {
 		ctx context.Context,
 		processID string,
 		eventID uuid.UUID,
-		nextAttemptAt time.Time,
 		reason string,
+		nextAttemptAt time.Time,
 	) (msnger.InboxEvent, error)
 
 	// FailedInboxEvent marks event as failed, sets:
@@ -111,18 +101,14 @@ type inbox interface {
 
 	// CleanProcessingInboxEvent cleans events with "status" msnger.InboxEventStatusProcessing.
 	// Intended for use when processors/topic processing is stopped.
-	CleanProcessingInboxEvent(ctx context.Context) error
+	CleanProcessingInboxEvents(ctx context.Context) error
 
 	// CleanProcessingInboxEventForProcessor is similar to CleanProcessingInboxEvent,
 	// but only for events with "reserved_by" equal to processID.
 	CleanProcessingInboxEventForProcessor(ctx context.Context, processID string) error
 
 	// CleanFailedInboxEvent cleans events with "status" msnger.InboxEventStatusFailed.
-	CleanFailedInboxEvent(ctx context.Context) error
-
-	// CleanFailedInboxEventForProcessor is similar to CleanFailedInboxEvent,
-	// but only for events with "reserved_by" equal to processID.
-	CleanFailedInboxEventForProcessor(ctx context.Context, processID string) error
+	CleanFailedInboxEvents(ctx context.Context) error
 
 	Transaction(ctx context.Context, fn func(ctx context.Context) error) error
 }

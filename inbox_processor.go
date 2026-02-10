@@ -20,5 +20,4 @@ type InboxMaintenance interface {
 	CleanInboxProcessingForProcessID(ctx context.Context, processID string) error
 
 	CleanInboxFailed(ctx context.Context) error
-	CleanInboxFailedForProcessID(ctx context.Context, processID string) error
 }
