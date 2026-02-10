@@ -22,7 +22,7 @@ CREATE TABLE inbox_events (
 
     reserved_by     TEXT,
 
-    status          inbox_event_status NOT NULL DEFAULT 'pending', -- pending | processed | failed
+    status          inbox_event_status NOT NULL DEFAULT 'pending', -- pending | processed | processing | failed
     attempts        INT NOT NULL DEFAULT 0 CHECK ( attempts >= 0 ),
     next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT (now() AT TIME ZONE 'UTC'),
     last_attempt_at TIMESTAMPTZ,

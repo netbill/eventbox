@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/netbill/logium"
 	"github.com/netbill/msnger"
+	"github.com/netbill/msnger/logfields"
 	"github.com/segmentio/kafka-go"
 )
 
@@ -50,6 +51,10 @@ type OutboxProcessorConfig struct {
 	// MaxNextAttempt is the maximum delay before next attempt to process failed event.
 	// If 0, it defaults to DefaultOutboxProcessorMaxNextAttempt.
 	MaxNextAttempt time.Duration
+
+	//MaxAttempts is the maximum number of attempts to process an event before it is marked as failed.
+	// If 0, it defaults to 5.
+	MaxAttempts int32
 }
 
 // OutboxProcessor reads pending outbox events from storage and publishes them to Kafka.
@@ -60,7 +65,7 @@ type OutboxProcessorConfig struct {
 //   - StartProcess does NOT automatically release/clean events reserved by this process.
 //     The caller must decide what to do on shutdown (e.g. call StopProcess or a maintenance cleanup).
 type OutboxProcessor struct {
-	log    *logium.Logger
+	log    *logium.Entry
 	config OutboxProcessorConfig
 
 	// box provides outbox storage operations (reserve/commit/delay/cleanup).
@@ -72,7 +77,7 @@ type OutboxProcessor struct {
 
 // NewOutboxProcessor creates a new OutboxProcessor.
 func NewOutboxProcessor(
-	log *logium.Logger,
+	log *logium.Entry,
 	cfg OutboxProcessorConfig,
 	box outbox,
 	writer *kafka.Writer,
@@ -117,23 +122,15 @@ type outboxProcessorJob struct {
 // outboxProcessorRes defines result of sending outbox event to kafka.
 type outboxProcessorRes struct {
 	eventID     uuid.UUID
+	topic       string
+	key         string
+	eType       string
 	err         error
+	attempts    int32
 	nextAttempt time.Time
 	processedAt time.Time
 }
 
-// StartProcess starts the processor loop and blocks until ctx is cancelled.
-//
-// Flow:
-//  1. Start MaxRutin send loops reading jobs from a channel.
-//  2. In a loop: reserve a batch of pending events, send them, then commit or delay.
-//
-// Notes:
-//   - processID identifies this running process in outbox storage (reservation/locks).
-//   - StartProcess stops when ctx is cancelled.
-//   - StartProcess DOES NOT perform any cleanup on exit.
-//     If the process is shutting down, the caller may call StopProcess(processID)
-//     or use maintenance methods to release reserved events.
 func (w *OutboxProcessor) StartProcess(ctx context.Context, id string) {
 	BatchSize := w.config.MinBatchSize
 	sleep := w.config.MinSleep
@@ -143,7 +140,6 @@ func (w *OutboxProcessor) StartProcess(ctx context.Context, id string) {
 		maxParallel = 1
 	}
 
-	// create to channels for sending jobs to send loops and receiving results back from them
 	jobs := make(chan outboxProcessorJob, maxParallel)
 	results := make(chan outboxProcessorRes, maxParallel)
 
@@ -151,8 +147,6 @@ func (w *OutboxProcessor) StartProcess(ctx context.Context, id string) {
 	wg.Add(maxParallel)
 
 	for i := 0; i < maxParallel; i++ {
-		// start send loops that will read reserved events from jobs channel,
-		// publish them to Kafka and report results back to results channel
 		go w.sendLoop(ctx, &wg, jobs, results)
 	}
 
@@ -167,8 +161,6 @@ func (w *OutboxProcessor) StartProcess(ctx context.Context, id string) {
 			return
 		}
 
-		// reserve a batch of pending events for this processor, send them via send loops,
-		// and then commit (sent) or delay (retry later) each event
 		numEvents := w.processBatch(ctx, id, BatchSize, jobs, results)
 
 		BatchSize = w.calculateBatch(numEvents)
@@ -182,7 +174,6 @@ func (w *OutboxProcessor) StartProcess(ctx context.Context, id string) {
 	}
 }
 
-// sendLoop reads reserved events from jobs channel, publishes them to Kafka and reports results.
 func (w *OutboxProcessor) sendLoop(
 	ctx context.Context,
 	wg *sync.WaitGroup,
@@ -191,7 +182,6 @@ func (w *OutboxProcessor) sendLoop(
 ) {
 	defer wg.Done()
 
-	// read jobs until the channel is closed or context is cancelled
 	for job := range jobs {
 		if ctx.Err() != nil {
 			return
@@ -200,44 +190,50 @@ func (w *OutboxProcessor) sendLoop(
 		ev := job.ev
 		msg := ev.ToKafkaMessage()
 
-		// try to send message to kafka topic
 		sendErr := w.writer.WriteMessages(ctx, msg)
 		if sendErr != nil {
-			w.log.WithError(sendErr).Errorf(
-				"failed to send event id=%s, topic=%s, event_type%s, attempts+%v",
-				ev.EventID, ev.Topic, ev.Type, ev.Attempts,
-			)
-			// if sending failed, report error back to results channel, so event will be delayed for future processing
+			w.log.WithError(sendErr).
+				WithField(logfields.ProcessID, ev.EventID).
+				WithFields(logfields.FromOutboxEvent(ev)).
+				Errorf("failed to send outbox event to Kafka")
+
 			results <- outboxProcessorRes{
 				eventID:     ev.EventID,
+				topic:       ev.Topic,
+				key:         ev.Key,
+				eType:       ev.Type,
 				err:         sendErr,
+				attempts:    ev.Attempts + 1,
 				nextAttempt: w.nextAttemptAt(ev.Attempts),
 				processedAt: time.Now().UTC(),
 			}
 			continue
 		}
 
-		// if sending succeeded, report success back to results channel, so event will be committed as sent
-		w.log.Debugf("sent event id=%s", ev.EventID)
 		results <- outboxProcessorRes{
 			eventID:     ev.EventID,
+			topic:       ev.Topic,
+			key:         ev.Key,
+			eType:       ev.Type,
+			err:         nil,
+			attempts:    ev.Attempts + 1,
 			processedAt: time.Now().UTC()}
 	}
 }
 
-// processBatch reserves up to batchSize pending events for this processor,
-// sends them via send loops, and then commits (sent) or delays (retry later) each event.
 func (w *OutboxProcessor) processBatch(
 	ctx context.Context,
-	id string,
+	processID string,
 	BatchSize int,
 	jobs chan<- outboxProcessorJob,
 	results <-chan outboxProcessorRes,
 ) int {
-	// reserve a batch of pending events for this processor
-	events, err := w.box.ReserveOutboxEvents(ctx, id, BatchSize)
+	events, err := w.box.ReserveOutboxEvents(ctx, processID, BatchSize)
 	if err != nil {
-		w.log.WithError(err).Error("failed to reserve events")
+		w.log.WithError(err).
+			WithField(logfields.ProcessID, processID).
+			Error("failed to reserve events")
+
 		return 0
 	}
 	if len(events) == 0 {
@@ -248,14 +244,13 @@ func (w *OutboxProcessor) processBatch(
 		select {
 		case <-ctx.Done():
 			return len(events)
-			// send reserved events to send loops via jobs channel, so
-			// they will be processed and then committed or delayed
 		case jobs <- outboxProcessorJob{ev: ev}:
 		}
 	}
 
 	commit := make(map[uuid.UUID]CommitOutboxEventParams, len(events))
 	pending := make(map[uuid.UUID]DelayOutboxEventData, len(events))
+	failed := make(map[uuid.UUID]FailedOutboxEventData, len(events))
 
 	for i := 0; i < len(events); i++ {
 		select {
@@ -263,10 +258,37 @@ func (w *OutboxProcessor) processBatch(
 			return len(events)
 		case r := <-results:
 			if r.err != nil {
+				if r.attempts >= w.config.MaxAttempts {
+					failed[r.eventID] = FailedOutboxEventData{
+						LastAttemptAt: r.processedAt,
+						Reason:        r.err.Error(),
+					}
+
+					w.log.
+						WithField(logfields.ProcessID, processID).
+						WithFields(logium.Fields{
+							logfields.EventIDFiled:      r.eventID,
+							logfields.EventTopicFiled:   r.topic,
+							logfields.EventTypeFiled:    r.eType,
+							logfields.EventAttemptFiled: r.attempts,
+						}).Errorf("event marked as failed after reaching max attempts")
+
+					continue
+				}
+
 				pending[r.eventID] = DelayOutboxEventData{
 					NextAttemptAt: r.nextAttempt,
 					Reason:        r.err.Error(),
 				}
+
+				w.log.
+					WithField(logfields.ProcessID, processID).
+					WithFields(logium.Fields{
+						logfields.EventIDFiled:      r.eventID,
+						logfields.EventTopicFiled:   r.topic,
+						logfields.EventTypeFiled:    r.eType,
+						logfields.EventAttemptFiled: r.attempts,
+					}).Warnf("event will be delayed for future processing after failed attempt")
 			} else {
 				commit[r.eventID] = CommitOutboxEventParams{SentAt: r.processedAt}
 			}
@@ -275,15 +297,19 @@ func (w *OutboxProcessor) processBatch(
 
 	if len(commit) > 0 {
 		// if sending succeeded, commit events as sent, so they won't be processed again
-		if err := w.box.CommitOutboxEvents(ctx, id, commit); err != nil {
-			w.log.WithError(err).Error("failed to mark events as sent")
+		if err = w.box.CommitOutboxEvents(ctx, processID, commit); err != nil {
+			w.log.WithError(err).
+				WithField(logfields.ProcessID, processID).
+				Error("failed to mark events as sent")
 		}
 	}
 
 	if len(pending) > 0 {
 		// if sending failed, delay events for future processing, so they will be retried later
-		if err := w.box.DelayOutboxEvents(ctx, id, pending); err != nil {
-			w.log.WithError(err).Error("failed to delay events")
+		if err = w.box.DelayOutboxEvents(ctx, processID, pending); err != nil {
+			w.log.WithError(err).
+				WithField(logfields.ProcessID, processID).
+				Error("failed to delay events")
 		}
 	}
 
@@ -291,7 +317,7 @@ func (w *OutboxProcessor) processBatch(
 }
 
 // nextAttemptAt calculates when next attempt to process a failed event based on the number of attempts.
-func (w *OutboxProcessor) nextAttemptAt(attempts int) time.Time {
+func (w *OutboxProcessor) nextAttemptAt(attempts int32) time.Time {
 	res := time.Second * time.Duration(30*attempts)
 	if res < w.config.MinNextAttempt {
 		return time.Now().UTC().Add(w.config.MinNextAttempt)
@@ -379,32 +405,18 @@ func (w *OutboxProcessor) calculateSleep(
 	return sleep
 }
 
-// StopProcess performs a best-effort cleanup for the given processID.
-//
-// It is intended to be called by the owner of the process on shutdown.
-// Typical implementation releases events reserved by this process back to pending,
-// so they can be picked up by other processes.
-//
-// StopProcess does not stop goroutines started by StartProcess.
-// Stopping is controlled via ctx cancellation passed to StartProcess.
-func (w *OutboxProcessor) StopProcess(ctx context.Context, id string) error {
-	err := w.box.CleanProcessingOutboxEventForProcessor(ctx, id)
+func (w *OutboxProcessor) StopProcess(ctx context.Context, processID string) error {
+	err := w.box.CleanProcessingOutboxEventForProcessor(ctx, processID)
 	if err != nil {
-		w.log.WithError(err).Error("failed to clean processing events for processor")
+		w.log.WithError(err).
+			WithField(logfields.ProcessID, processID).
+			Error("failed to clean processing events for processor")
 		return err
 	}
 
 	return nil
 }
 
-// CleanOutboxProcessing performs storage-level cleanup of processing events.
-//
-// WARNING:
-//   - This is a maintenance operation.
-//   - In multi-instance setups it may affect events reserved by other processes,
-//     depending on the storage implementation.
-//
-// Prefer CleanOutboxProcessingForProcessID when you need to clean only one process.
 func (w *OutboxProcessor) CleanOutboxProcessing(ctx context.Context) error {
 	err := w.box.CleanProcessingOutboxEvent(ctx)
 	if err != nil {
@@ -415,22 +427,19 @@ func (w *OutboxProcessor) CleanOutboxProcessing(ctx context.Context) error {
 	return nil
 }
 
-// CleanOutboxProcessingForProcessID performs storage-level cleanup of processing events
-// reserved by the specified processID.
-func (w *OutboxProcessor) CleanOutboxProcessingForProcessID(ctx context.Context, id string) error {
+func (w *OutboxProcessor) CleanOutboxProcessingForProcessID(ctx context.Context, processID string) error {
 
-	err := w.box.CleanProcessingOutboxEventForProcessor(ctx, id)
+	err := w.box.CleanProcessingOutboxEventForProcessor(ctx, processID)
 	if err != nil {
-		w.log.WithError(err).Error("failed to clean processing events for processor")
+		w.log.WithError(err).
+			WithField(logfields.ProcessID, processID).
+			Error("failed to clean processing events for processor")
 		return err
 	}
 
 	return nil
 }
 
-// CleanOutboxFailed performs storage-level cleanup of failed events.
-//
-// WARNING: This is a maintenance operation and its exact behavior depends on storage implementation.
 func (w *OutboxProcessor) CleanOutboxFailed(ctx context.Context) error {
 
 	err := w.box.CleanFailedOutboxEvent(ctx)

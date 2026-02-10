@@ -22,21 +22,21 @@ const (
 
 type InboxEvent struct {
 	EventID uuid.UUID `json:"event_id"`
-	Seq     int       `json:"seq"`
+	Seq     int64     `json:"seq"`
 
 	Topic     string `json:"topic"`
 	Key       string `json:"key"`
 	Type      string `json:"type"`
-	Version   int    `json:"version"`
+	Version   int32  `json:"version"`
 	Producer  string `json:"producer"`
 	Payload   []byte `json:"payload"`
-	Partition int    `json:"partition"`
-	Offset    int    `json:"offset"`
+	Partition int32  `json:"partition"`
+	Offset    int64  `json:"offset"`
 
 	ReservedBy *string `json:"reserved_by"`
 
 	Status        string     `json:"status"`
-	Attempts      int        `json:"attempts"`
+	Attempts      int32      `json:"attempts"`
 	NextAttemptAt time.Time  `json:"next_attempt_at"`
 	LastAttemptAt *time.Time `json:"last_attempt_at"`
 	LastError     *string    `json:"last_error"`

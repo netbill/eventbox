@@ -187,13 +187,13 @@ RETURNING event_id, seq, topic, key, type, version, producer, payload, partition
 `
 
 type MarkInboxEventAsFailedParams struct {
-	Reason    pgtype.Text
+	LastError pgtype.Text
 	EventID   pgtype.UUID
 	ProcessID pgtype.Text
 }
 
 func (q *Queries) MarkInboxEventAsFailed(ctx context.Context, arg MarkInboxEventAsFailedParams) (InboxEvent, error) {
-	row := q.db.QueryRow(ctx, markInboxEventAsFailed, arg.Reason, arg.EventID, arg.ProcessID)
+	row := q.db.QueryRow(ctx, markInboxEventAsFailed, arg.LastError, arg.EventID, arg.ProcessID)
 	var i InboxEvent
 	err := row.Scan(
 		&i.EventID,
@@ -236,7 +236,7 @@ RETURNING event_id, seq, topic, key, type, version, producer, payload, partition
 
 type MarkInboxEventAsPendingParams struct {
 	NextAttemptAt pgtype.Timestamptz
-	Reason        pgtype.Text
+	LastError     pgtype.Text
 	EventID       pgtype.UUID
 	ProcessID     pgtype.Text
 }
@@ -244,7 +244,7 @@ type MarkInboxEventAsPendingParams struct {
 func (q *Queries) MarkInboxEventAsPending(ctx context.Context, arg MarkInboxEventAsPendingParams) (InboxEvent, error) {
 	row := q.db.QueryRow(ctx, markInboxEventAsPending,
 		arg.NextAttemptAt,
-		arg.Reason,
+		arg.LastError,
 		arg.EventID,
 		arg.ProcessID,
 	)

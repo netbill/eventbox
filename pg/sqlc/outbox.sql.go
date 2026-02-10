@@ -108,7 +108,7 @@ type InsertOutboxEventParams struct {
 	Version       int32
 	Producer      string
 	Payload       []byte
-	Status        string
+	Status        OutboxEventStatus
 	Attempts      int32
 	NextAttemptAt pgtype.Timestamptz
 }
@@ -150,16 +150,16 @@ func (q *Queries) InsertOutboxEvent(ctx context.Context, arg InsertOutboxEventPa
 
 const markOutboxEventsAsFailed = `-- name: MarkOutboxEventsAsFailed :exec
 WITH inp AS (
-    SELECT i.event_id, r.reason
+    SELECT i.event_id, r.last_error
     FROM unnest($2::uuid[]) WITH ORDINALITY AS i(event_id, ord)
-    JOIN unnest($3::text[]) WITH ORDINALITY AS r(reason, ord)
+    JOIN unnest($3::text[]) WITH ORDINALITY AS r(last_error, ord)
         USING (ord)
 )
 UPDATE outbox_events e
 SET status          = 'failed',
     attempts        = e.attempts + 1,
     last_attempt_at = (now() AT TIME ZONE 'UTC'),
-    last_error      = inp.reason,
+    last_error      = inp.last_error,
     reserved_by     = NULL
     FROM inp
 WHERE e.event_id = inp.event_id
@@ -168,13 +168,13 @@ WHERE e.event_id = inp.event_id
 `
 
 type MarkOutboxEventsAsFailedParams struct {
-	ProcessID pgtype.Text
-	EventIds  []pgtype.UUID
-	Reasons   []string
+	ProcessID  pgtype.Text
+	EventIds   []pgtype.UUID
+	LastErrors []string
 }
 
 func (q *Queries) MarkOutboxEventsAsFailed(ctx context.Context, arg MarkOutboxEventsAsFailedParams) error {
-	_, err := q.db.Exec(ctx, markOutboxEventsAsFailed, arg.ProcessID, arg.EventIds, arg.Reasons)
+	_, err := q.db.Exec(ctx, markOutboxEventsAsFailed, arg.ProcessID, arg.EventIds, arg.LastErrors)
 	return err
 }
 

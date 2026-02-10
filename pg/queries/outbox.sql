@@ -109,16 +109,16 @@ WHERE e.event_id = inp.event_id
 
 -- name: MarkOutboxEventsAsFailed :exec
 WITH inp AS (
-    SELECT i.event_id, r.reason
+    SELECT i.event_id, r.last_error
     FROM unnest(sqlc.arg(event_ids)::uuid[]) WITH ORDINALITY AS i(event_id, ord)
-    JOIN unnest(sqlc.arg(reasons)::text[]) WITH ORDINALITY AS r(reason, ord)
+    JOIN unnest(sqlc.arg(last_errors)::text[]) WITH ORDINALITY AS r(last_error, ord)
         USING (ord)
 )
 UPDATE outbox_events e
 SET status          = 'failed',
     attempts        = e.attempts + 1,
     last_attempt_at = (now() AT TIME ZONE 'UTC'),
-    last_error      = inp.reason,
+    last_error      = inp.last_error,
     reserved_by     = NULL
     FROM inp
 WHERE e.event_id = inp.event_id

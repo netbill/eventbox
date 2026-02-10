@@ -55,6 +55,50 @@ func (ns NullInboxEventStatus) Value() (driver.Value, error) {
 	return string(ns.InboxEventStatus), nil
 }
 
+type OutboxEventStatus string
+
+const (
+	OutboxEventStatusPending    OutboxEventStatus = "pending"
+	OutboxEventStatusProcessed  OutboxEventStatus = "processed"
+	OutboxEventStatusProcessing OutboxEventStatus = "processing"
+	OutboxEventStatusFailed     OutboxEventStatus = "failed"
+)
+
+func (e *OutboxEventStatus) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = OutboxEventStatus(s)
+	case string:
+		*e = OutboxEventStatus(s)
+	default:
+		return fmt.Errorf("unsupported scan type for OutboxEventStatus: %T", src)
+	}
+	return nil
+}
+
+type NullOutboxEventStatus struct {
+	OutboxEventStatus OutboxEventStatus
+	Valid             bool // Valid is true if OutboxEventStatus is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullOutboxEventStatus) Scan(value interface{}) error {
+	if value == nil {
+		ns.OutboxEventStatus, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.OutboxEventStatus.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullOutboxEventStatus) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.OutboxEventStatus), nil
+}
+
 type InboxEvent struct {
 	EventID       pgtype.UUID
 	Seq           int64
@@ -87,7 +131,7 @@ type OutboxEvent struct {
 	Producer      string
 	Payload       []byte
 	ReservedBy    pgtype.Text
-	Status        string
+	Status        OutboxEventStatus
 	Attempts      int32
 	NextAttemptAt pgtype.Timestamptz
 	LastAttemptAt pgtype.Timestamptz

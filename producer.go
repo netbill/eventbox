@@ -11,5 +11,5 @@ type Producer interface {
 	Publish(ctx context.Context, msg kafka.Message) error
 	WriteToOutbox(ctx context.Context, msg kafka.Message) (uuid.UUID, error)
 
-	Shutdown(ctx context.Context) error
+	Close() error
 }

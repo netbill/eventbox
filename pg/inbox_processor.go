@@ -6,10 +6,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/netbill/msnger"
-	"github.com/segmentio/kafka-go"
-
 	"github.com/netbill/logium"
+	"github.com/netbill/msnger"
+	"github.com/netbill/msnger/logfields"
 )
 
 const (
@@ -57,20 +56,11 @@ type InboxProcessorConfig struct {
 
 	// MaxAttempts is the maximum number of attempts to process event before marking it as failed.
 	// If 0, the event will always receive the status InboxEventStatusPending in case of failure of processing.
-	MaxAttempts int
+	MaxAttempts int32
 }
 
-// InboxProcessor reads pending inbox events from storage and processes them using registered handlers.
-//
-// Semantics:
-//   - At-least-once processing: the same event can be handled more than once
-//     (e.g. due to retries, crashes, or commit failures). Handlers must be idempotent.
-//   - A processor runs as a long-living process identified by processID.
-//   - StartProcess blocks until ctx is cancelled and drains internal workers.
-//   - StartProcess does NOT automatically clean/release events reserved by this process.
-//     The caller decides what cleanup to run on shutdown via StopProcess or maintenance methods.
 type InboxProcessor struct {
-	log    *logium.Logger
+	log    *logium.Entry
 	config InboxProcessorConfig
 
 	box   inbox
@@ -79,7 +69,7 @@ type InboxProcessor struct {
 
 // NewInboxProcessor creates a new InboxProcessor.
 func NewInboxProcessor(
-	log *logium.Logger,
+	log *logium.Entry,
 	box inbox,
 	config InboxProcessorConfig,
 ) *InboxProcessor {
@@ -164,30 +154,20 @@ func (w *InboxProcessor) Route(eventType string, handler msnger.InboxHandlerFunc
 	w.route[eventType] = handler
 }
 
-// StartProcess starts the processor loop and blocks until ctx is cancelled.
-//
-// processID is used to reserve/lock events for this process and should be unique among
-// concurrently running processes. If two processes use the same processID, they may
-// compete for the same reserved events and cause duplicate work.
-//
-// Flow:
-//  1. feederLoop periodically reserves pending events and sends them to handleLoop via jobs channel.
-//  2. handleLoop processes events using registered handlers and then updates event state:
-//     commit (processed), delay (retry later), or failed (if MaxAttempts exceeded).
-//
-// Notes:
-//   - StartProcess stops when ctx is cancelled.
-//   - StartProcess does NOT perform any cleanup on exit.
-//     If the process is shutting down, the caller may call StopProcess(processID)
-//     or use maintenance cleanup methods to release reserved events.
 func (w *InboxProcessor) StartProcess(ctx context.Context, processID string) {
-	// create channels for processing events and limit the number of events being processed in parallel using slots channel
+	defer func() {
+		if err := w.StopProcess(context.Background(), processID); err != nil {
+			w.log.WithError(err).
+				WithField(logfields.ProcessID, processID).
+				Error("failed to stop inbox processor")
+		}
+	}()
+
 	slots := make(chan inboxProcessorSlot, w.config.InFlight)
 	for i := 0; i < w.config.InFlight; i++ {
 		slots <- inboxProcessorSlot{}
 	}
 
-	// create channel for sending jobs to handle loops
 	jobs := make(chan inboxProcessorJob, w.config.InFlight)
 
 	var wg sync.WaitGroup
@@ -208,15 +188,6 @@ func (w *InboxProcessor) StartProcess(ctx context.Context, processID string) {
 	wg.Wait()
 }
 
-// feederLoop reserve events for processor by "processID" and send
-//
-// Flow:
-//  1. reserve events for "processID"
-//  2. if no events or failed to reserve, sleep for a while and try again
-//  3. try to take a slot if success try to reserve events
-//  4. if successful taken slot try to send job to handleLoop, if failed to send job, give back slot and try again
-//
-// The loop continues until the context is done. After that, it tries to clean up any events reserved for this processor.
 func (w *InboxProcessor) feederLoop(
 	ctx context.Context,
 	processID string,
@@ -247,7 +218,9 @@ func (w *InboxProcessor) feederLoop(
 
 		events, err := w.box.ReserveInboxEvents(ctx, processID, limit)
 		if err != nil {
-			w.log.WithError(err).Error("failed to reserve inbox events")
+			w.log.WithError(err).
+				WithField(logfields.ProcessID, processID).
+				Error("failed to reserve inbox events")
 			if !sleepCtx(ctx, sleep) {
 				return
 			}
@@ -281,16 +254,6 @@ func (w *InboxProcessor) feederLoop(
 	}
 }
 
-// handleLoop receives events from jobs channel, processes them using registered handlers,
-// and then commits (processed) or delays (retry later) each event.
-//
-// Flow:
-//  1. receive job from jobs channel
-//  2. process event using registered handler
-//  3. if processing is successful, commit event,
-//     otherwise delay it for retry later or mark as failed if attempts exceeded
-//
-// The loop continues until the jobs channel is closed and all jobs are processed, or the context is done.
 func (w *InboxProcessor) handleLoop(
 	ctx context.Context,
 	processID string,
@@ -303,20 +266,20 @@ func (w *InboxProcessor) handleLoop(
 		err := w.box.Transaction(ctx, func(ctx context.Context) error {
 			var err error
 
-			hErr := w.handleEvent(ctx, ev.Type, ev.ToKafkaMessage())
+			hErr := w.handleEvent(ctx, ev)
 			if hErr != nil {
 				switch {
 				case w.config.MaxAttempts != 0 && ev.Attempts >= w.config.MaxAttempts:
 					ev, err = w.box.FailedInboxEvent(ctx, processID, ev.EventID, hErr.Error())
 					if err != nil {
-						return fmt.Errorf("failed to mark inbox event as failed id=%s: %w", ev.EventID, err)
+						return err
 					}
 
 					return nil
 				default:
 					ev, err = w.box.DelayInboxEvent(ctx, processID, ev.EventID, hErr.Error(), w.nextAttemptAt(ev.Attempts))
 					if err != nil {
-						return fmt.Errorf("failed to delay inbox event id=%s: %w", ev.EventID, err)
+						return err
 					}
 
 					return nil
@@ -325,16 +288,16 @@ func (w *InboxProcessor) handleLoop(
 
 			ev, err = w.box.CommitInboxEvent(ctx, processID, ev.EventID)
 			if err != nil {
-				return fmt.Errorf("failed to commit inbox event id=%s: %w", ev.EventID, err)
+				return err
 			}
 
 			return nil
 		})
 		if err != nil {
-			w.log.WithError(err).Errorf(
-				"failed to process inbox event id=%s type=%s attempts=%d",
-				ev.EventID, ev.Type, ev.Attempts,
-			)
+			w.log.WithError(err).
+				WithField(logfields.ProcessID, processID).
+				WithFields(logfields.FromInboxEvent(ev)).
+				Error("failed to process inbox event")
 		}
 
 		giveSlot(slots)
@@ -345,28 +308,19 @@ func (w *InboxProcessor) handleLoop(
 	}
 }
 
-// handleEvent processes the event using the registered handler for the event type.
-// If there is no handler for the event type, it logs a warning and returns nil.
-func (w *InboxProcessor) handleEvent(
-	ctx context.Context,
-	eventType string,
-	message kafka.Message,
-) error {
-	handler, ok := w.route[eventType]
+func (w *InboxProcessor) handleEvent(ctx context.Context, event msnger.InboxEvent) error {
+	handler, ok := w.route[event.Type]
 	if !ok {
-		w.log.Warnf(
-			"onUnknown called for event topic=%s partition=%d offset=%d",
-			message.Topic, message.Partition, message.Offset,
-		)
+		w.log.WithFields(logfields.FromInboxEvent(event)).
+			Infof("no handler for event type=%s", event.Type)
 
 		return nil
 	}
 
-	return handler(ctx, message)
+	return handler(ctx, event.ToKafkaMessage())
 }
 
-// nextAttemptAt calculates the time when next attempt to process a failed event based on the number of attempts.
-func (w *InboxProcessor) nextAttemptAt(attempts int) time.Time {
+func (w *InboxProcessor) nextAttemptAt(attempts int32) time.Time {
 	res := time.Second * time.Duration(30*attempts)
 	if res < w.config.MinNextAttempt {
 		return time.Now().UTC().Add(w.config.MinNextAttempt)
@@ -378,7 +332,6 @@ func (w *InboxProcessor) nextAttemptAt(attempts int) time.Time {
 	return time.Now().UTC().Add(res)
 }
 
-// sleepCtx sleeps for the given duration or until the context is done, whichever comes first.
 func sleepCtx(ctx context.Context, d time.Duration) bool {
 	if d <= 0 {
 		return true
@@ -395,59 +348,18 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-// StopProcess performs a best-effort cleanup for the given processID.
-//
-// Current behavior depends on storage implementation. In this pg implementation
-// it cleans failed events associated with the processID.
-//
-// StopProcess does not stop goroutines started by StartProcess.
-// Stopping is controlled via ctx cancellation passed to StartProcess.
 func (w *InboxProcessor) StopProcess(ctx context.Context, processID string) error {
-	err := w.box.CleanProcessingInboxEventForProcessor(ctx, processID)
-	if err != nil {
-		w.log.WithError(err).Errorf("failed to clean own failed events for processID=%s", processID)
-	}
-	return err
+	return w.box.CleanProcessingInboxEventForProcessor(ctx, processID)
 }
 
-// CleanInboxProcessing performs storage-level cleanup of processing events.
-//
-// WARNING:
-//   - This is a maintenance operation and may affect events reserved by other processes,
-//     depending on storage implementation.
-//
-// Prefer CleanInboxProcessingForProcessID when you need to clean only one process.
 func (w *InboxProcessor) CleanInboxProcessing(ctx context.Context) error {
-	err := w.box.CleanProcessingInboxEvents(ctx)
-	if err != nil {
-		w.log.WithError(err).Error("failed to clean processing events")
-	}
-
-	return err
+	return w.box.CleanProcessingInboxEvents(ctx)
 }
 
-// CleanInboxProcessingForProcessID performs storage-level cleanup of processing events for the given processID.
 func (w *InboxProcessor) CleanInboxProcessingForProcessID(ctx context.Context, processID string) error {
-	err := w.box.CleanProcessingInboxEventForProcessor(ctx, processID)
-	if err != nil {
-		w.log.WithError(err).Errorf("failed to clean processing events for processID=%s", processID)
-	}
-
-	return err
+	return w.box.CleanProcessingInboxEventForProcessor(ctx, processID)
 }
 
-// CleanInboxFailed performs storage-level cleanup of failed events.
-//
-// WARNING:
-//   - This is a maintenance operation and may affect events reserved by other processes,
-//     depending on storage implementation.
-//
-// Prefer CleanInboxFailedForProcessID when you need to clean only one process.
 func (w *InboxProcessor) CleanInboxFailed(ctx context.Context) error {
-	err := w.box.CleanFailedInboxEvents(ctx)
-	if err != nil {
-		w.log.WithError(err).Error("failed to clean failed events")
-	}
-
-	return err
+	return w.box.CleanFailedInboxEvents(ctx)
 }

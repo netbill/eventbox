@@ -1,5 +1,12 @@
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
+CREATE TYPE outbox_event_status AS ENUM (
+    'pending',
+    'processed',
+    'processing',
+    'failed'
+);
+
 CREATE TABLE outbox_events (
     event_id UUID   PRIMARY KEY NOT NULL,
     seq      BIGINT GENERATED ALWAYS AS IDENTITY NOT NULL UNIQUE CHECK ( seq >= 0 ),
@@ -13,7 +20,7 @@ CREATE TABLE outbox_events (
 
     reserved_by     VARCHAR,
 
-    status          VARCHAR NOT NULL DEFAULT 'pending', -- pending | processing | sent | failed
+    status          outbox_event_status NOT NULL DEFAULT 'pending', -- pending | processing | sent | failed
     attempts        INT NOT NULL DEFAULT 0 CHECK ( attempts >= 0 ),
     next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT (now() AT TIME ZONE 'UTC'),
     last_attempt_at TIMESTAMPTZ,

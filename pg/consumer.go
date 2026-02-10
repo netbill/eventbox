@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/netbill/logium"
+	"github.com/netbill/msnger/logfields"
 	"github.com/segmentio/kafka-go"
 )
 
@@ -26,14 +27,14 @@ type ConsumerConfig struct {
 }
 
 type Consumer struct {
-	log    *logium.Logger
+	log    *logium.Entry
 	inbox  inbox
 	config ConsumerConfig
 }
 
 // NewConsumer creates a new Consumer with the given logger, inbox, and configuration.
 func NewConsumer(
-	log *logium.Logger,
+	log *logium.Entry,
 	inbox inbox,
 	config ConsumerConfig,
 ) *Consumer {
@@ -54,9 +55,6 @@ func NewConsumer(
 	}
 }
 
-// StartReading starts the consumer loop, which continuously fetches messages from the Kafka topic,
-// writes them to the inbox, and commits the messages. It handles errors with an exponential backoff strategy.
-// The loop will exit when the context is canceled.
 func (c *Consumer) StartReading(
 	ctx context.Context,
 	readerConfig kafka.ReaderConfig,
@@ -64,18 +62,21 @@ func (c *Consumer) StartReading(
 	r := kafka.NewReader(readerConfig)
 	defer func() {
 		if derr := r.Close(); derr != nil {
-			c.log.WithError(derr).Errorf("failed to close kafka reader: topic=%s", readerConfig.Topic)
+			c.log.WithError(derr).
+				WithField(logfields.EventTopicFiled, readerConfig.Topic).
+				Error("consumer close failed")
 		}
 	}()
 
 	backoff := c.config.MinBackoff
+
+	c.log.WithField(logfields.EventTopicFiled, readerConfig.Topic).Infof("started consumer loop")
 
 	for {
 		if ctx.Err() != nil {
 			return
 		}
 
-		// Fetch the next message from Kafka
 		m, err := c.fetchMessage(ctx, r)
 		if err != nil {
 			if !c.backoffOrStop(ctx, &backoff) {
@@ -84,7 +85,6 @@ func (c *Consumer) StartReading(
 			continue
 		}
 
-		// Write the message to the inbox
 		if err = c.writeInbox(ctx, m); err != nil {
 			if !c.backoffOrStop(ctx, &backoff) {
 				return
@@ -92,7 +92,6 @@ func (c *Consumer) StartReading(
 			continue
 		}
 
-		// Commit the message in Kafka
 		if err = c.commitMessage(ctx, r, m); err != nil {
 			if !c.backoffOrStop(ctx, &backoff) {
 				return
@@ -104,77 +103,56 @@ func (c *Consumer) StartReading(
 	}
 }
 
-// fetchMessage attempts to fetch a message from the Kafka reader.
-// It returns an error if the context is canceled or if there is a failure in fetching the message.
 func (c *Consumer) fetchMessage(ctx context.Context, r *kafka.Reader) (kafka.Message, error) {
 	m, err := r.FetchMessage(ctx)
-
 	if err != nil {
-		if ctx.Err() != nil {
-			return kafka.Message{}, ctx.Err()
-		}
+		c.log.WithError(err).
+			WithField(logfields.EventTopicFiled, r.Config().Topic).
+			Errorf("failed to fetch message from Kafka")
 
-		c.log.WithError(err).Errorf("failed to fetch message: topic=%s", r.Config().Topic)
 		return kafka.Message{}, fmt.Errorf("fetch message: %w", err)
 	}
 
 	return m, nil
 }
 
-// writeInbox attempts to write the given Kafka message to the inbox.
-// if the message already exists in the inbox, it logs a warning and skips the message without returning an error.
-// It returns an error if the context is canceled or if there is a failure in writing to the inbox.
 func (c *Consumer) writeInbox(ctx context.Context, m kafka.Message) error {
-	event, err := c.inbox.WriteInboxEvent(ctx, m)
+	_, err := c.inbox.WriteInboxEvent(ctx, m)
+	if err != nil {
+		if errors.Is(err, ErrInboxEventAlreadyExists) {
+			c.log.
+				WithFields(logfields.FromMessage(m)).
+				Info("inbox event already exists")
 
-	switch {
-	case err == nil:
-		c.log.Debugf(
-			"written event to inbox: event_id=%s topic=%s partition=%d offset=%d",
-			event.EventID, event.Topic, event.Partition, event.Offset,
-		)
-		return nil
+			return nil
+		}
 
-	case errors.Is(err, ErrInboxEventAlreadyExists):
-		c.log.Warnf(
-			"inbox event already exists, skipping message: topic=%s partition=%d offset=%d key=%s",
-			m.Topic, m.Partition, m.Offset, string(m.Key),
-		)
-		return nil
+		c.log.WithError(err).
+			WithFields(logfields.FromMessage(m)).
+			Errorf("failed to write inbox event")
 
-	case ctx.Err() != nil:
-		return ctx.Err()
-
-	default:
-		c.log.WithError(err).Errorf(
-			"failed to write inbox event: topic=%s partition=%d offset=%d key=%s",
-			m.Topic, m.Partition, m.Offset, string(m.Key),
-		)
 		return fmt.Errorf("write inbox event: %w", err)
 	}
+
+	return nil
 }
 
-// commitMessage attempts to commit the given Kafka message using the reader.
-// It returns an error if the context is canceled or if there is a failure in committing the message.
 func (c *Consumer) commitMessage(ctx context.Context, r *kafka.Reader, m kafka.Message) error {
 	if err := r.CommitMessages(ctx, m); err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 
-		c.log.WithError(err).Errorf(
-			"failed to commit message: topic=%s partition=%d offset=%d",
-			m.Topic, m.Partition, m.Offset,
-		)
+		c.log.WithError(err).
+			WithFields(logfields.FromMessage(m)).
+			Errorf("failed to commit message in Kafka")
+
 		return fmt.Errorf("commit message: %w", err)
 	}
 
 	return nil
 }
 
-// backoffOrStop implements calculating the next backoff duration using an exponential backoff strategy
-// and checks if the context is canceled. It waits for the specified backoff duration before returning true to
-// indicate that the caller should retry the operation.
 func (c *Consumer) backoffOrStop(ctx context.Context, backoff *time.Duration) bool {
 	t := time.NewTimer(*backoff)
 	defer t.Stop()
