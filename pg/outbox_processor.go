@@ -9,11 +9,12 @@ import (
 	"github.com/netbill/logium"
 	"github.com/netbill/msnger"
 	"github.com/netbill/msnger/logfields"
+	"github.com/netbill/pgdbx"
 	"github.com/segmentio/kafka-go"
 )
 
 const (
-	DefaultOutboxProcessorMaxRutin = 10
+	DefaultOutboxProcessorRoutines = 10
 
 	DefaultOutboxProcessorMinSleep = 100 * time.Millisecond
 	DefaultOutboxProcessorMaxSleep = 5 * time.Second
@@ -27,9 +28,9 @@ const (
 
 // OutboxProcessorConfig configures OutboxProcessor behavior.
 type OutboxProcessorConfig struct {
-	// MaxRutin is the maximum number of parallel send loops.
-	// If 0, it defaults to DefaultOutboxProcessorMaxRutin.
-	MaxRutin int
+	// Routines is the maximum number of parallel send loops.
+	// If 0, it defaults to DefaultOutboxProcessorRoutines.
+	Routines int
 
 	// MinSleep is the minimum delay between iterations when there are few/no events.
 	// If 0, it defaults to DefaultOutboxProcessorMinSleep.
@@ -38,12 +39,12 @@ type OutboxProcessorConfig struct {
 	// If 0, it defaults to DefaultOutboxProcessorMaxSleep.
 	MaxSleep time.Duration
 
-	// MinBatchSize is the minimum number of events reserved per batch.
+	// MinBatch is the minimum number of events reserved per batch.
 	// If 0, it defaults to DefaultOutboxProcessorMinBatchSize.
-	MinBatchSize int
-	// MaxBatchSize is the maximum number of events reserved per batch.
+	MinBatch int
+	// MaxBatch is the maximum number of events reserved per batch.
 	// If 0, it defaults to DefaultOutboxProcessorMaxBatchSize.
-	MaxBatchSize int
+	MaxBatch int
 
 	// MinNextAttempt is the minimum delay before next attempt to process failed event.
 	// If 0, it defaults to DefaultOutboxProcessorMinNextAttempt.
@@ -79,11 +80,11 @@ type OutboxProcessor struct {
 func NewOutboxProcessor(
 	log *logium.Entry,
 	cfg OutboxProcessorConfig,
-	box outbox,
+	db *pgdbx.DB,
 	writer *kafka.Writer,
 ) *OutboxProcessor {
-	if cfg.MaxRutin < 0 {
-		cfg.MaxRutin = DefaultOutboxProcessorMaxRutin
+	if cfg.Routines < 0 {
+		cfg.Routines = DefaultOutboxProcessorRoutines
 	}
 	if cfg.MinSleep <= 0 {
 		cfg.MinSleep = DefaultOutboxProcessorMinSleep
@@ -91,11 +92,11 @@ func NewOutboxProcessor(
 	if cfg.MaxSleep <= 0 {
 		cfg.MaxSleep = DefaultOutboxProcessorMaxSleep
 	}
-	if cfg.MinBatchSize <= 0 {
-		cfg.MinBatchSize = DefaultOutboxProcessorMinBatchSize
+	if cfg.MinBatch <= 0 {
+		cfg.MinBatch = DefaultOutboxProcessorMinBatchSize
 	}
-	if cfg.MaxBatchSize < cfg.MinBatchSize {
-		cfg.MaxBatchSize = DefaultOutboxProcessorMaxBatchSize
+	if cfg.MaxBatch < cfg.MinBatch {
+		cfg.MaxBatch = DefaultOutboxProcessorMaxBatchSize
 	}
 	if cfg.MinNextAttempt <= 0 {
 		cfg.MinNextAttempt = DefaultOutboxProcessorMinNextAttempt
@@ -107,7 +108,7 @@ func NewOutboxProcessor(
 	w := &OutboxProcessor{
 		log:    log,
 		config: cfg,
-		box:    box,
+		box:    outbox{db: db},
 		writer: writer,
 	}
 
@@ -131,11 +132,12 @@ type outboxProcessorRes struct {
 	processedAt time.Time
 }
 
-func (w *OutboxProcessor) StartProcess(ctx context.Context, id string) {
-	BatchSize := w.config.MinBatchSize
+// RunProcess starts the outbox processing loop for the given process ID.
+func (w *OutboxProcessor) RunProcess(ctx context.Context, id string) {
+	BatchSize := w.config.MinBatch
 	sleep := w.config.MinSleep
 
-	maxParallel := w.config.MaxRutin
+	maxParallel := w.config.Routines
 	if maxParallel <= 0 {
 		maxParallel = 1
 	}
@@ -174,6 +176,7 @@ func (w *OutboxProcessor) StartProcess(ctx context.Context, id string) {
 	}
 }
 
+// sendLoop is a worker loop that sends outbox events to Kafka and reports results.
 func (w *OutboxProcessor) sendLoop(
 	ctx context.Context,
 	wg *sync.WaitGroup,
@@ -221,6 +224,7 @@ func (w *OutboxProcessor) sendLoop(
 	}
 }
 
+// processBatch reserves a batch of events, sends them to workers via jobs channel, and collects results.
 func (w *OutboxProcessor) processBatch(
 	ctx context.Context,
 	processID string,
@@ -232,7 +236,7 @@ func (w *OutboxProcessor) processBatch(
 	if err != nil {
 		w.log.WithError(err).
 			WithField(logfields.ProcessID, processID).
-			Error("failed to reserve events")
+			Error("failed to reserve outbox events")
 
 		return 0
 	}
@@ -258,20 +262,19 @@ func (w *OutboxProcessor) processBatch(
 			return len(events)
 		case r := <-results:
 			if r.err != nil {
-				if r.attempts >= w.config.MaxAttempts {
+				if r.attempts != 0 && r.attempts >= w.config.MaxAttempts {
 					failed[r.eventID] = FailedOutboxEventData{
 						LastAttemptAt: r.processedAt,
 						Reason:        r.err.Error(),
 					}
 
-					w.log.
-						WithField(logfields.ProcessID, processID).
-						WithFields(logium.Fields{
-							logfields.EventIDFiled:      r.eventID,
-							logfields.EventTopicFiled:   r.topic,
-							logfields.EventTypeFiled:    r.eType,
-							logfields.EventAttemptFiled: r.attempts,
-						}).Errorf("event marked as failed after reaching max attempts")
+					w.log.WithFields(logium.Fields{
+						logfields.ProcessID:         processID,
+						logfields.EventIDFiled:      r.eventID,
+						logfields.EventTopicFiled:   r.topic,
+						logfields.EventTypeFiled:    r.eType,
+						logfields.EventAttemptFiled: r.attempts,
+					}).Errorf("event marked as failed after reaching max attempts")
 
 					continue
 				}
@@ -281,14 +284,13 @@ func (w *OutboxProcessor) processBatch(
 					Reason:        r.err.Error(),
 				}
 
-				w.log.
-					WithField(logfields.ProcessID, processID).
-					WithFields(logium.Fields{
-						logfields.EventIDFiled:      r.eventID,
-						logfields.EventTopicFiled:   r.topic,
-						logfields.EventTypeFiled:    r.eType,
-						logfields.EventAttemptFiled: r.attempts,
-					}).Warnf("event will be delayed for future processing after failed attempt")
+				w.log.WithFields(logium.Fields{
+					logfields.ProcessID:         processID,
+					logfields.EventIDFiled:      r.eventID,
+					logfields.EventTopicFiled:   r.topic,
+					logfields.EventTypeFiled:    r.eType,
+					logfields.EventAttemptFiled: r.attempts,
+				}).Warnf("event will be delayed for future processing after failed attempt")
 			} else {
 				commit[r.eventID] = CommitOutboxEventParams{SentAt: r.processedAt}
 			}
@@ -316,7 +318,7 @@ func (w *OutboxProcessor) processBatch(
 	return len(events)
 }
 
-// nextAttemptAt calculates when next attempt to process a failed event based on the number of attempts.
+// nextAttemsptAt calculates when next attempt to process a failed event based on the number of attempts.
 func (w *OutboxProcessor) nextAttemptAt(attempts int32) time.Time {
 	res := time.Second * time.Duration(30*attempts)
 	if res < w.config.MinNextAttempt {
@@ -333,8 +335,8 @@ func (w *OutboxProcessor) nextAttemptAt(attempts int32) time.Time {
 func (w *OutboxProcessor) calculateBatch(
 	numEvents int,
 ) int {
-	minBatch := w.config.MinBatchSize
-	maxBatch := w.config.MaxBatchSize
+	minBatch := w.config.MinBatch
+	maxBatch := w.config.MaxBatch
 	if maxBatch == 0 {
 		maxBatch = 100
 	}
@@ -377,11 +379,11 @@ func (w *OutboxProcessor) calculateSleep(
 			sleep = lastSleep * 2
 		}
 
-	case numEvents >= w.config.MaxBatchSize:
+	case numEvents >= w.config.MaxBatch:
 		sleep = 0
 
 	default:
-		fill := float64(numEvents) / float64(w.config.MaxBatchSize)
+		fill := float64(numEvents) / float64(w.config.MaxBatch)
 
 		switch {
 		case fill >= 0.75:
@@ -405,6 +407,7 @@ func (w *OutboxProcessor) calculateSleep(
 	return sleep
 }
 
+// StopProcess stops the outbox processing for the given process ID by cleaning up any reserved events.
 func (w *OutboxProcessor) StopProcess(ctx context.Context, processID string) error {
 	err := w.box.CleanProcessingOutboxEventForProcessor(ctx, processID)
 	if err != nil {
@@ -417,6 +420,7 @@ func (w *OutboxProcessor) StopProcess(ctx context.Context, processID string) err
 	return nil
 }
 
+// CleanOutboxProcessing cleans up all reserved events, making them available for processing again.
 func (w *OutboxProcessor) CleanOutboxProcessing(ctx context.Context) error {
 	err := w.box.CleanProcessingOutboxEvent(ctx)
 	if err != nil {
@@ -427,8 +431,9 @@ func (w *OutboxProcessor) CleanOutboxProcessing(ctx context.Context) error {
 	return nil
 }
 
+// CleanOutboxProcessingForProcessID cleans up reserved events for a specific process ID,
+// making them available for processing again.
 func (w *OutboxProcessor) CleanOutboxProcessingForProcessID(ctx context.Context, processID string) error {
-
 	err := w.box.CleanProcessingOutboxEventForProcessor(ctx, processID)
 	if err != nil {
 		w.log.WithError(err).
@@ -440,8 +445,8 @@ func (w *OutboxProcessor) CleanOutboxProcessingForProcessID(ctx context.Context,
 	return nil
 }
 
+// CleanOutboxFailed cleans up all failed events, making them available for processing again.
 func (w *OutboxProcessor) CleanOutboxFailed(ctx context.Context) error {
-
 	err := w.box.CleanFailedOutboxEvent(ctx)
 	if err != nil {
 		w.log.WithError(err).Error("failed to clean failed events")

@@ -12,7 +12,7 @@ import (
 	"github.com/netbill/ape"
 	"github.com/netbill/msnger"
 	"github.com/netbill/msnger/headers"
-	sqlc "github.com/netbill/msnger/pg/sqlc"
+	"github.com/netbill/msnger/pg/sqlc"
 	"github.com/netbill/pgdbx"
 	"github.com/segmentio/kafka-go"
 )
@@ -45,6 +45,9 @@ func (b *outbox) queries() *sqlc.Queries {
 	return sqlc.New(b.db)
 }
 
+// WriteOutboxEvent writes a Kafka message to the outbox.
+// It extracts the required headers from the message and inserts a new outbox event into the database.
+// If an event with the same ID already exists, it returns an error.
 func (b *outbox) WriteOutboxEvent(
 	ctx context.Context,
 	message kafka.Message,
@@ -79,6 +82,7 @@ func (b *outbox) WriteOutboxEvent(
 	return parseOutboxEventFromSqlcRow(row), nil
 }
 
+// GetOutboxEventByID retrieves an outbox event by its ID.
 func (b *outbox) GetOutboxEventByID(
 	ctx context.Context,
 	id uuid.UUID,
@@ -95,6 +99,12 @@ func (b *outbox) GetOutboxEventByID(
 	return parseOutboxEventFromSqlcRow(row), nil
 }
 
+// ReserveOutboxEvents reserves a batch of outbox events for processing by a specific processor.
+// How it works:
+// select batch of pending events ordered by created_at with limit = limit*10 + 100
+// after that mark as reserved batch of events with limit = limit where id in (ids of selected events) and reserved_by is null,
+// but important don't mark events which key+topic is already reserved by another processor,
+// because it can cause deadlocks between processors
 func (b *outbox) ReserveOutboxEvents(
 	ctx context.Context,
 	processID string,
@@ -117,6 +127,7 @@ func (b *outbox) ReserveOutboxEvents(
 	return result, nil
 }
 
+// CommitOutboxEvents marks a batch of outbox events as sent by a specific processor.
 func (b *outbox) CommitOutboxEvents(
 	ctx context.Context,
 	processID string,
@@ -141,6 +152,7 @@ func (b *outbox) CommitOutboxEvents(
 	return nil
 }
 
+// DelayOutboxEvents marks a batch of outbox events as pending for retry by a specific processor.
 func (b *outbox) DelayOutboxEvents(
 	ctx context.Context,
 	processID string,
@@ -171,6 +183,7 @@ func (b *outbox) DelayOutboxEvents(
 	return nil
 }
 
+// FailOutboxEvents marks a batch of outbox events as failed by a specific processor.
 func (b *outbox) FailOutboxEvents(
 	ctx context.Context,
 	processID string,
@@ -197,6 +210,7 @@ func (b *outbox) FailOutboxEvents(
 	return nil
 }
 
+// CleanProcessingOutboxEvent cleans up outbox events which status is processing
 func (b *outbox) CleanProcessingOutboxEvent(ctx context.Context) error {
 	err := b.queries().CleanProcessingOutboxEvents(ctx)
 	if err != nil {
@@ -206,6 +220,7 @@ func (b *outbox) CleanProcessingOutboxEvent(ctx context.Context) error {
 	return nil
 }
 
+// CleanProcessingOutboxEventForProcessor cleans up outbox events which status is processing for specific processor
 func (b *outbox) CleanProcessingOutboxEventForProcessor(ctx context.Context, processID string) error {
 	err := b.queries().CleanReservedProcessingOutboxEvents(ctx, pgtype.Text{String: processID, Valid: true})
 	if err != nil {
@@ -215,6 +230,7 @@ func (b *outbox) CleanProcessingOutboxEventForProcessor(ctx context.Context, pro
 	return nil
 }
 
+// CleanFailedOutboxEvent cleans up outbox events which status is failed
 func (b *outbox) CleanFailedOutboxEvent(ctx context.Context) error {
 	err := b.queries().CleanFailedOutboxEvents(ctx)
 	if err != nil {

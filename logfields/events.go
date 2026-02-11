@@ -16,8 +16,6 @@ const (
 	EventVersionFiled  = "event_version"
 	EventProducerFiled = "event_producer"
 	EventAttemptFiled  = "event_attempt"
-
-	HeaderOk = "header_ok"
 )
 
 func FromHeader(hs headers.MessageRequiredHeaders) logium.Fields {
@@ -36,7 +34,11 @@ func FromMessage(m kafka.Message) logium.Fields {
 
 	hs, err := headers.ParseMessageRequiredHeaders(m.Headers)
 	if err != nil {
-		res[HeaderOk] = false
+		res[EventTopicFiled] = "unknown"
+		res[EventTypeFiled] = "unknown"
+		res[EventVersionFiled] = "unknown"
+		res[EventProducerFiled] = "unknown"
+
 		return res
 	}
 

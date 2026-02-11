@@ -5,7 +5,7 @@ import (
 )
 
 type OutboxProcessor interface {
-	StartProcess(ctx context.Context, processID string)
+	RunProcess(ctx context.Context, processID string)
 	StopProcess(ctx context.Context, processID string) error
 }
 

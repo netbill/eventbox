@@ -6,7 +6,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.8.0
 	github.com/netbill/ape v0.1.1
-	github.com/netbill/logium v0.1.2
+	github.com/netbill/logium v0.2.1
 	github.com/netbill/pgdbx v0.3.1
 	github.com/segmentio/kafka-go v0.4.50
 )

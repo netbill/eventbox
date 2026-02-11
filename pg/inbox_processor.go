@@ -9,10 +9,11 @@ import (
 	"github.com/netbill/logium"
 	"github.com/netbill/msnger"
 	"github.com/netbill/msnger/logfields"
+	"github.com/netbill/pgdbx"
 )
 
 const (
-	DefaultInboxProcessorMaxRutin = 10
+	DefaultInboxProcessorRoutines = 10
 
 	DefaultInboxProcessorMaxSleep = 5 * time.Second
 	DefaultInboxProcessorMinSleep = 50 * time.Millisecond
@@ -26,12 +27,9 @@ const (
 
 // InboxProcessorConfig defines configuration for InboxProcessor.
 type InboxProcessorConfig struct {
-	// MaxRutin is the maximum number of parallel handle loops.
-	// If 0, it defaults to DefaultInboxProcessorMaxRutin.
-	MaxRutin int
-	// InFlight is the maximum number of events being processed in parallel.
-	// If 0, it defaults to MaxRutin * 4.
-	InFlight int
+	// Routines is the maximum number of parallel handle loops.
+	// If 0, it defaults to DefaultInboxProcessorRoutines.
+	Routines int
 
 	// MinSleep is the minimum delay between iterations when there are few/no events.
 	// If 0, it defaults to DefaultInboxProcessorMinSleep.
@@ -70,14 +68,11 @@ type InboxProcessor struct {
 // NewInboxProcessor creates a new InboxProcessor.
 func NewInboxProcessor(
 	log *logium.Entry,
-	box inbox,
+	db *pgdbx.DB,
 	config InboxProcessorConfig,
 ) *InboxProcessor {
-	if config.MaxRutin <= 0 {
-		config.MaxRutin = DefaultInboxProcessorMaxRutin
-	}
-	if config.InFlight <= 0 {
-		config.InFlight = config.MaxRutin * 4
+	if config.Routines <= 0 {
+		config.Routines = DefaultInboxProcessorRoutines
 	}
 	if config.MinSleep <= 0 {
 		config.MinSleep = DefaultInboxProcessorMinSleep
@@ -100,7 +95,7 @@ func NewInboxProcessor(
 
 	return &InboxProcessor{
 		log:    log,
-		box:    box,
+		box:    inbox{db: db},
 		config: config,
 		route:  make(map[string]msnger.InboxHandlerFunc),
 	}
@@ -145,50 +140,54 @@ func giveSlot(slots chan<- inboxProcessorSlot) {
 // Route registers a handler for the given event type.
 // It panics if a handler for this event type is already registered.
 //
-// Route is expected to be called during initialization, before StartProcess.
-func (w *InboxProcessor) Route(eventType string, handler msnger.InboxHandlerFunc) {
-	if _, ok := w.route[eventType]; ok {
+// Route is expected to be called during initialization, before RunProcess.
+func (p *InboxProcessor) Route(eventType string, handler msnger.InboxHandlerFunc) {
+	if _, ok := p.route[eventType]; ok {
 		panic(fmt.Errorf("double handler for event type=%s", eventType))
 	}
 
-	w.route[eventType] = handler
+	p.route[eventType] = handler
 }
 
-func (w *InboxProcessor) StartProcess(ctx context.Context, processID string) {
+// RunProcess starts processing inbox events for the given process ID.
+func (p *InboxProcessor) RunProcess(ctx context.Context, processID string) {
 	defer func() {
-		if err := w.StopProcess(context.Background(), processID); err != nil {
-			w.log.WithError(err).
+		if err := p.StopProcess(context.Background(), processID); err != nil {
+			p.log.WithError(err).
 				WithField(logfields.ProcessID, processID).
 				Error("failed to stop inbox processor")
 		}
 	}()
 
-	slots := make(chan inboxProcessorSlot, w.config.InFlight)
-	for i := 0; i < w.config.InFlight; i++ {
+	// Initialize the slots channel with the configured number of in-flight processing slots.
+	slots := make(chan inboxProcessorSlot, p.config.Routines*4)
+	for i := 0; i < p.config.Routines*4; i++ {
 		slots <- inboxProcessorSlot{}
 	}
 
-	jobs := make(chan inboxProcessorJob, w.config.InFlight)
+	// Initialize the jobs channel for processing events.
+	jobs := make(chan inboxProcessorJob, p.config.Routines*4)
 
 	var wg sync.WaitGroup
-	wg.Add(w.config.MaxRutin + 1)
+	wg.Add(p.config.Routines + 1)
 
 	go func() {
 		defer wg.Done()
-		w.feederLoop(ctx, processID, slots, jobs)
+		p.feederLoop(ctx, processID, slots, jobs)
 	}()
 
-	for i := 0; i < w.config.MaxRutin; i++ {
+	for i := 0; i < p.config.Routines; i++ {
 		go func() {
 			defer wg.Done()
-			w.handleLoop(ctx, processID, slots, jobs)
+			p.handleLoop(ctx, processID, slots, jobs)
 		}()
 	}
 
 	wg.Wait()
 }
 
-func (w *InboxProcessor) feederLoop(
+// feederLoop continuously reserves batches of inbox events and sends them to the jobs channel for processing.
+func (p *InboxProcessor) feederLoop(
 	ctx context.Context,
 	processID string,
 	slots chan inboxProcessorSlot,
@@ -196,34 +195,33 @@ func (w *InboxProcessor) feederLoop(
 ) {
 	defer close(jobs)
 
-	sleep := w.config.MinSleep
-	maxSleep := w.config.MaxSleep
+	sleep := p.config.MinSleep
+	maxSleep := p.config.MaxSleep
 
 	for {
+		if ctx.Err() != nil {
+			return
+		}
+
 		free := len(slots)
 		if free == 0 {
-			if !sleepCtx(ctx, sleep) {
-				return
-			}
+			p.sleep(ctx, 0, sleep)
+
 			continue
 		}
 
-		limit := free
-		if limit > w.config.MaxBatch {
-			limit = w.config.MaxBatch
-		}
-		if limit < w.config.MinBatch {
-			limit = w.config.MinBatch
-		}
+		limit := p.calculateBatch(free)
 
-		events, err := w.box.ReserveInboxEvents(ctx, processID, limit)
+		// Reserve a batch of inbox events for processing. If there are no events,
+		// increase the sleep duration before the next attempt.
+		events, err := p.box.ReserveInboxEvents(ctx, processID, limit)
 		if err != nil {
-			w.log.WithError(err).
+			p.log.WithError(err).
 				WithField(logfields.ProcessID, processID).
 				Error("failed to reserve inbox events")
-			if !sleepCtx(ctx, sleep) {
-				return
-			}
+
+			p.sleep(ctx, 0, sleep)
+
 			continue
 		}
 
@@ -232,15 +230,13 @@ func (w *InboxProcessor) feederLoop(
 			if next > maxSleep {
 				next = maxSleep
 			}
-			sleep = next
-			if !sleepCtx(ctx, sleep) {
-				return
-			}
+
+			p.sleep(ctx, len(events), sleep)
 
 			continue
 		}
 
-		sleep = w.config.MinSleep
+		sleep = p.config.MinSleep
 
 		for _, ev := range events {
 			if !takeSlot(ctx, slots) {
@@ -254,7 +250,8 @@ func (w *InboxProcessor) feederLoop(
 	}
 }
 
-func (w *InboxProcessor) handleLoop(
+// handleLoop continuously processes inbox events received from the jobs channel.
+func (p *InboxProcessor) handleLoop(
 	ctx context.Context,
 	processID string,
 	slots chan inboxProcessorSlot,
@@ -263,21 +260,21 @@ func (w *InboxProcessor) handleLoop(
 	for job := range jobs {
 		ev := job.event
 
-		err := w.box.Transaction(ctx, func(ctx context.Context) error {
+		err := p.box.Transaction(ctx, func(ctx context.Context) error {
 			var err error
 
-			hErr := w.handleEvent(ctx, ev)
+			hErr := p.handleEvent(ctx, ev)
 			if hErr != nil {
 				switch {
-				case w.config.MaxAttempts != 0 && ev.Attempts >= w.config.MaxAttempts:
-					ev, err = w.box.FailedInboxEvent(ctx, processID, ev.EventID, hErr.Error())
+				case p.config.MaxAttempts != 0 && ev.Attempts >= p.config.MaxAttempts:
+					ev, err = p.box.FailedInboxEvent(ctx, processID, ev.EventID, hErr.Error())
 					if err != nil {
 						return err
 					}
 
 					return nil
 				default:
-					ev, err = w.box.DelayInboxEvent(ctx, processID, ev.EventID, hErr.Error(), w.nextAttemptAt(ev.Attempts))
+					ev, err = p.box.DelayInboxEvent(ctx, processID, ev.EventID, hErr.Error(), p.nextAttemptAt(ev.Attempts))
 					if err != nil {
 						return err
 					}
@@ -286,7 +283,7 @@ func (w *InboxProcessor) handleLoop(
 				}
 			}
 
-			ev, err = w.box.CommitInboxEvent(ctx, processID, ev.EventID)
+			ev, err = p.box.CommitInboxEvent(ctx, processID, ev.EventID)
 			if err != nil {
 				return err
 			}
@@ -294,7 +291,7 @@ func (w *InboxProcessor) handleLoop(
 			return nil
 		})
 		if err != nil {
-			w.log.WithError(err).
+			p.log.WithError(err).
 				WithField(logfields.ProcessID, processID).
 				WithFields(logfields.FromInboxEvent(ev)).
 				Error("failed to process inbox event")
@@ -308,10 +305,11 @@ func (w *InboxProcessor) handleLoop(
 	}
 }
 
-func (w *InboxProcessor) handleEvent(ctx context.Context, event msnger.InboxEvent) error {
-	handler, ok := w.route[event.Type]
+// handleEvent processes a single inbox event by looking up the appropriate handler based on the event type.
+func (p *InboxProcessor) handleEvent(ctx context.Context, event msnger.InboxEvent) error {
+	handler, ok := p.route[event.Type]
 	if !ok {
-		w.log.WithFields(logfields.FromInboxEvent(event)).
+		p.log.WithFields(logfields.FromInboxEvent(event)).
 			Infof("no handler for event type=%s", event.Type)
 
 		return nil
@@ -320,46 +318,121 @@ func (w *InboxProcessor) handleEvent(ctx context.Context, event msnger.InboxEven
 	return handler(ctx, event.ToKafkaMessage())
 }
 
-func (w *InboxProcessor) nextAttemptAt(attempts int32) time.Time {
+// nextAttemptAt calculates the next attempt time for processing a failed event based on the number of attempts
+// and the configured minimum and maximum next attempt durations.
+func (p *InboxProcessor) nextAttemptAt(attempts int32) time.Time {
 	res := time.Second * time.Duration(30*attempts)
-	if res < w.config.MinNextAttempt {
-		return time.Now().UTC().Add(w.config.MinNextAttempt)
+	if res < p.config.MinNextAttempt {
+		return time.Now().UTC().Add(p.config.MinNextAttempt)
 	}
-	if res > w.config.MaxNextAttempt {
-		return time.Now().UTC().Add(w.config.MaxNextAttempt)
+	if res > p.config.MaxNextAttempt {
+		return time.Now().UTC().Add(p.config.MaxNextAttempt)
 	}
 
 	return time.Now().UTC().Add(res)
 }
 
-func sleepCtx(ctx context.Context, d time.Duration) bool {
-	if d <= 0 {
-		return true
+func (p *InboxProcessor) calculateBatch(numEvents int) int {
+	minBatch := p.config.MinBatch
+	maxBatch := p.config.MaxBatch
+	if maxBatch == 0 {
+		maxBatch = 100
 	}
 
-	t := time.NewTimer(d)
+	var batch int
+	switch {
+	case numEvents == 0:
+		batch = minBatch
+	case numEvents >= maxBatch:
+		batch = maxBatch
+	default:
+		batch = numEvents * 2
+	}
+
+	if batch < minBatch {
+		batch = minBatch
+	}
+	if batch > maxBatch {
+		batch = maxBatch
+	}
+
+	return batch
+}
+
+func (p *InboxProcessor) sleep(
+	ctx context.Context,
+	numEvents int,
+	lastSleep time.Duration,
+) time.Duration {
+	minSleep := p.config.MinSleep
+	maxSleep := p.config.MaxSleep
+
+	var sleep time.Duration
+
+	switch {
+	case numEvents == 0:
+		if lastSleep == 0 {
+			sleep = minSleep
+		} else {
+			sleep = lastSleep * 2
+		}
+
+	case numEvents >= p.config.MaxBatch:
+		sleep = 0
+
+	default:
+		fill := float64(numEvents) / float64(p.config.MaxBatch)
+
+		switch {
+		case fill >= 0.75:
+			sleep = 0
+		case fill >= 0.5:
+			sleep = minSleep
+		case fill >= 0.25:
+			sleep = minSleep * 2
+		default:
+			sleep = minSleep * 4
+		}
+	}
+
+	if sleep < minSleep {
+		sleep = minSleep
+	}
+	if sleep > maxSleep {
+		sleep = maxSleep
+	}
+
+	if sleep <= 0 {
+		return sleep
+	}
+
+	t := time.NewTimer(sleep)
 	defer t.Stop()
 
 	select {
 	case <-ctx.Done():
-		return false
+		return sleep
 	case <-t.C:
-		return true
+		return sleep
 	}
 }
 
-func (w *InboxProcessor) StopProcess(ctx context.Context, processID string) error {
-	return w.box.CleanProcessingInboxEventForProcessor(ctx, processID)
+// StopProcess stops processing inbox events for the given process ID by cleaning up any events that are currently marked as processing for that processor.
+func (p *InboxProcessor) StopProcess(ctx context.Context, processID string) error {
+	return p.box.CleanProcessingInboxEventForProcessor(ctx, processID)
 }
 
-func (w *InboxProcessor) CleanInboxProcessing(ctx context.Context) error {
-	return w.box.CleanProcessingInboxEvents(ctx)
+// CleanInboxProcessing removes all inbox events that are currently marked as processing, regardless of the processor that reserved them.
+func (p *InboxProcessor) CleanInboxProcessing(ctx context.Context) error {
+	return p.box.CleanProcessingInboxEvents(ctx)
 }
 
-func (w *InboxProcessor) CleanInboxProcessingForProcessID(ctx context.Context, processID string) error {
-	return w.box.CleanProcessingInboxEventForProcessor(ctx, processID)
+// CleanInboxProcessingForProcessID removes all inbox events that are currently marked as processing by a specific processor, identified by the process ID.
+func (p *InboxProcessor) CleanInboxProcessingForProcessID(ctx context.Context, processID string) error {
+	return p.box.CleanProcessingInboxEventForProcessor(ctx, processID)
 }
 
-func (w *InboxProcessor) CleanInboxFailed(ctx context.Context) error {
-	return w.box.CleanFailedInboxEvents(ctx)
+// CleanInboxFailed removes all inbox events that are currently marked as failed, regardless of the processor that reserved them.
+func (p *InboxProcessor) CleanInboxFailed(ctx context.Context) error {
+	return p.box.CleanFailedInboxEvents(ctx)
 }

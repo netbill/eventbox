@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/netbill/msnger"
+	"github.com/netbill/pgdbx"
 	"github.com/segmentio/kafka-go"
 )
 
@@ -16,16 +17,18 @@ type producer struct {
 
 func NewProducer(
 	writer *kafka.Writer,
-	outbox outbox,
+	db *pgdbx.DB,
 ) msnger.Producer {
 	p := &producer{
 		writer: writer,
-		outbox: outbox,
+		outbox: outbox{db: db},
 	}
 
 	return p
 }
 
+// Publish writes the message directly to Kafka.
+// It should be used when the message is not critical and can be lost in case of failure.
 func (p *producer) Publish(
 	ctx context.Context,
 	msg kafka.Message,
@@ -38,6 +41,7 @@ func (p *producer) Publish(
 	return nil
 }
 
+// WriteToOutbox writes the message to the outbox table.
 func (p *producer) WriteToOutbox(
 	ctx context.Context,
 	msg kafka.Message,
@@ -50,6 +54,7 @@ func (p *producer) WriteToOutbox(
 	return event.EventID, nil
 }
 
+// Close closes the Kafka writer.
 func (p *producer) Close() error {
 	if err := p.writer.Close(); err != nil {
 		return fmt.Errorf("close writer: %w", err)
