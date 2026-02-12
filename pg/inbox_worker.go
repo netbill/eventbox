@@ -103,7 +103,7 @@ func NewInboxWorker(
 
 	return &InboxWorker{
 		id:     id,
-		log:    log.WithField("component", "inbox-worker").WithField("worker_id", id),
+		log:    log.WithField("worker_id", id),
 		box:    inbox{db: db},
 		config: config,
 		route:  make(map[string]eventbox.InboxHandlerFunc),
@@ -193,6 +193,10 @@ func (p *InboxWorker) feederLoop(
 	sleep := p.config.MinSleep
 
 	for {
+		if ctx.Err() != nil {
+			return
+		}
+		
 		free := len(slots)
 		if free == 0 {
 			sleep = p.sleep(ctx, 0, sleep)

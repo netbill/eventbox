@@ -57,30 +57,17 @@ func NewConsumer(
 	}
 }
 
-// RunReader starts the consumer loop that reads messages from Kafka, writes them to the inbox, and commits them.
-func (c *Consumer) RunReader(
-	ctx context.Context,
-	readerConfig kafka.ReaderConfig,
-) {
-	r := kafka.NewReader(readerConfig)
-	defer func() {
-		if derr := r.Close(); derr != nil {
-			c.log.WithError(derr).
-				WithField(logfields.EventTopicFiled, readerConfig.Topic).
-				Error("consumer close failed")
-		}
-	}()
+// Read starts the consumer loop that reads messages from Kafka, writes them to the inbox, and commits them.
+func (c *Consumer) Read(ctx context.Context, reader *kafka.Reader) {
+	c.log.WithField(logfields.EventTopicFiled, reader.Config().Topic).Infof("starting reading process")
 
 	backoff := c.config.MinBackoff
-
-	c.log.WithField(logfields.EventTopicFiled, readerConfig.Topic).Infof("starting reading process")
-
 	for {
 		if ctx.Err() != nil {
 			return
 		}
 
-		m, err := c.fetchMessage(ctx, r)
+		m, err := c.fetchMessage(ctx, reader)
 		if err != nil {
 			if !c.backoffOrStop(ctx, &backoff) {
 				return
@@ -95,7 +82,7 @@ func (c *Consumer) RunReader(
 			continue
 		}
 
-		if err = c.commitMessage(ctx, r, m); err != nil {
+		if err = c.commitMessage(ctx, reader, m); err != nil {
 			if !c.backoffOrStop(ctx, &backoff) {
 				return
 			}
@@ -128,12 +115,10 @@ func (c *Consumer) writeInbox(ctx context.Context, m kafka.Message) error {
 	if err != nil {
 		if errors.Is(err, ErrInboxEventAlreadyExists) {
 			c.log.WithFields(logfields.FromMessage(m)).Info("inbox event already exists")
-
 			return nil
 		}
 
 		c.log.WithError(err).WithFields(logfields.FromMessage(m)).Errorf("failed to write inbox event")
-
 		return fmt.Errorf("write inbox event: %w", err)
 	}
 
@@ -149,7 +134,6 @@ func (c *Consumer) commitMessage(ctx context.Context, r *kafka.Reader, m kafka.M
 		}
 
 		c.log.WithError(err).WithFields(logfields.FromMessage(m)).Errorf("failed to commit message in Kafka")
-
 		return fmt.Errorf("commit message: %w", err)
 	}
 

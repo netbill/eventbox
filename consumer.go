@@ -7,5 +7,5 @@ import (
 )
 
 type Consumer interface {
-	RunReader(ctx context.Context, cfg kafka.ReaderConfig)
+	Read(ctx context.Context, reader *kafka.Reader)
 }

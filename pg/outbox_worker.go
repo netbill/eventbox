@@ -104,7 +104,7 @@ func NewOutboxWorker(
 
 	w := &OutboxWorker{
 		id:     id,
-		log:    log.WithField("component", "outbox-worker").WithField("worker_id", id),
+		log:    log.WithField("worker_id", id),
 		config: config,
 		box:    outbox{db: db},
 		writer: writer,
