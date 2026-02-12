@@ -10,9 +10,9 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/netbill/ape"
-	"github.com/netbill/msnger"
-	"github.com/netbill/msnger/headers"
-	"github.com/netbill/msnger/pg/sqlc"
+	"github.com/netbill/eventbox"
+	"github.com/netbill/eventbox/headers"
+	"github.com/netbill/eventbox/pg/sqlc"
 	"github.com/netbill/pgdbx"
 	"github.com/segmentio/kafka-go"
 )
@@ -51,10 +51,10 @@ func (b *outbox) queries() *sqlc.Queries {
 func (b *outbox) WriteOutboxEvent(
 	ctx context.Context,
 	message kafka.Message,
-) (msnger.OutboxEvent, error) {
+) (eventbox.OutboxEvent, error) {
 	h, err := headers.ParseMessageRequiredHeaders(message.Headers)
 	if err != nil {
-		return msnger.OutboxEvent{}, err
+		return eventbox.OutboxEvent{}, err
 	}
 
 	row, err := b.queries().InsertOutboxEvent(ctx, sqlc.InsertOutboxEventParams{
@@ -67,16 +67,16 @@ func (b *outbox) WriteOutboxEvent(
 		Producer: h.Producer,
 		Payload:  message.Value,
 
-		Status:        msnger.OutboxEventStatusPending,
+		Status:        eventbox.OutboxEventStatusPending,
 		Attempts:      0,
 		NextAttemptAt: pgtype.Timestamptz{Time: time.Now().UTC(), Valid: true},
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return msnger.OutboxEvent{}, ErrOutboxEventAlreadyExists.Raise(err)
+			return eventbox.OutboxEvent{}, ErrOutboxEventAlreadyExists.Raise(err)
 		}
 
-		return msnger.OutboxEvent{}, fmt.Errorf("insert outbox event: %w", err)
+		return eventbox.OutboxEvent{}, fmt.Errorf("insert outbox event: %w", err)
 	}
 
 	return parseOutboxEventFromSqlcRow(row), nil
@@ -86,14 +86,14 @@ func (b *outbox) WriteOutboxEvent(
 func (b *outbox) GetOutboxEventByID(
 	ctx context.Context,
 	id uuid.UUID,
-) (msnger.OutboxEvent, error) {
+) (eventbox.OutboxEvent, error) {
 	row, err := b.queries().GetOutboxEventByID(ctx, pgtype.UUID{Bytes: id, Valid: true})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return msnger.OutboxEvent{}, ErrOutboxEventNotFound.Raise(err)
+			return eventbox.OutboxEvent{}, ErrOutboxEventNotFound.Raise(err)
 		}
 
-		return msnger.OutboxEvent{}, fmt.Errorf("get outbox event by id: %w", err)
+		return eventbox.OutboxEvent{}, fmt.Errorf("get outbox event by id: %w", err)
 	}
 
 	return parseOutboxEventFromSqlcRow(row), nil
@@ -107,11 +107,11 @@ func (b *outbox) GetOutboxEventByID(
 // because it can cause deadlocks between processors
 func (b *outbox) ReserveOutboxEvents(
 	ctx context.Context,
-	processID string,
+	workerID string,
 	limit int,
-) ([]msnger.OutboxEvent, error) {
+) ([]eventbox.OutboxEvent, error) {
 	rows, err := b.queries().ReserveOutboxEvents(ctx, sqlc.ReserveOutboxEventsParams{
-		ProcessID:  pgtype.Text{String: processID, Valid: true},
+		WorkerID:   pgtype.Text{String: workerID, Valid: true},
 		BatchLimit: int32(limit),
 		SortLimit:  int32(limit*10 + 100),
 	})
@@ -119,7 +119,7 @@ func (b *outbox) ReserveOutboxEvents(
 		return nil, fmt.Errorf("reserve outbox events: %w", err)
 	}
 
-	result := make([]msnger.OutboxEvent, 0, len(rows))
+	result := make([]eventbox.OutboxEvent, 0, len(rows))
 	for _, row := range rows {
 		result = append(result, parseOutboxEventFromSqlcRow(row))
 	}
@@ -130,7 +130,7 @@ func (b *outbox) ReserveOutboxEvents(
 // CommitOutboxEvents marks a batch of outbox events as sent by a specific processor.
 func (b *outbox) CommitOutboxEvents(
 	ctx context.Context,
-	processID string,
+	workerID string,
 	events map[uuid.UUID]CommitOutboxEventParams,
 ) error {
 	eventIDs := make([]pgtype.UUID, 0, len(events))
@@ -141,9 +141,9 @@ func (b *outbox) CommitOutboxEvents(
 	}
 
 	err := b.queries().MarkOutboxEventsAsSent(ctx, sqlc.MarkOutboxEventsAsSentParams{
-		ProcessID: pgtype.Text{String: processID, Valid: true},
-		EventIds:  eventIDs,
-		SentAts:   SentAts,
+		WorkerID: pgtype.Text{String: workerID, Valid: true},
+		EventIds: eventIDs,
+		SentAts:  SentAts,
 	})
 	if err != nil {
 		return fmt.Errorf("mark outbox events as sent: %w", err)
@@ -155,7 +155,7 @@ func (b *outbox) CommitOutboxEvents(
 // DelayOutboxEvents marks a batch of outbox events as pending for retry by a specific processor.
 func (b *outbox) DelayOutboxEvents(
 	ctx context.Context,
-	processID string,
+	workerID string,
 	events map[uuid.UUID]DelayOutboxEventData,
 ) error {
 	eventIDs := make([]pgtype.UUID, 0, len(events))
@@ -170,7 +170,7 @@ func (b *outbox) DelayOutboxEvents(
 	}
 
 	err := b.queries().MarkOutboxEventsAsPending(ctx, sqlc.MarkOutboxEventsAsPendingParams{
-		ProcessID:      pgtype.Text{String: processID, Valid: true},
+		WorkerID:       pgtype.Text{String: workerID, Valid: true},
 		EventIds:       eventIDs,
 		NextAttemptAts: nextAttemptAts,
 		LastAttemptAts: lastAttemptAts,
@@ -186,7 +186,7 @@ func (b *outbox) DelayOutboxEvents(
 // FailedOutboxEvents marks a batch of outbox events as failed by a specific processor.
 func (b *outbox) FailedOutboxEvents(
 	ctx context.Context,
-	processID string,
+	workerID string,
 	events map[uuid.UUID]FailedOutboxEventData,
 ) error {
 	eventIDs := make([]pgtype.UUID, 0, len(events))
@@ -199,7 +199,7 @@ func (b *outbox) FailedOutboxEvents(
 	}
 
 	err := b.queries().MarkOutboxEventsAsFailed(ctx, sqlc.MarkOutboxEventsAsFailedParams{
-		ProcessID:  pgtype.Text{String: processID, Valid: true},
+		WorkerID:   pgtype.Text{String: workerID, Valid: true},
 		EventIds:   eventIDs,
 		LastErrors: lastErrors,
 	})
@@ -211,14 +211,14 @@ func (b *outbox) FailedOutboxEvents(
 }
 
 // CleanProcessingOutboxEvent cleans up outbox events which status is processing
-func (b *outbox) CleanProcessingOutboxEvent(ctx context.Context, processIDs ...string) error {
-	if len(processIDs) == 0 {
+func (b *outbox) CleanProcessingOutboxEvent(ctx context.Context, workerIDs ...string) error {
+	if len(workerIDs) == 0 {
 		err := b.queries().CleanProcessingOutboxEvents(ctx)
 		if err != nil {
 			return fmt.Errorf("clean processing outbox events: %w", err)
 		}
 	} else {
-		err := b.queries().CleanReservedProcessingOutboxEvents(ctx, processIDs)
+		err := b.queries().CleanReservedProcessingOutboxEvents(ctx, workerIDs)
 		if err != nil {
 			return fmt.Errorf("clean processing outbox events for processor: %w", err)
 		}
@@ -237,8 +237,8 @@ func (b *outbox) CleanFailedOutboxEvent(ctx context.Context) error {
 	return nil
 }
 
-func parseOutboxEventFromSqlcRow(row sqlc.OutboxEvent) msnger.OutboxEvent {
-	event := msnger.OutboxEvent{
+func parseOutboxEventFromSqlcRow(row sqlc.OutboxEvent) eventbox.OutboxEvent {
+	event := eventbox.OutboxEvent{
 		EventID: row.EventID.Bytes,
 		Seq:     row.Seq,
 

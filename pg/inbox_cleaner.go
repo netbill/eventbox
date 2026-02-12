@@ -3,6 +3,7 @@ package pg
 import (
 	"context"
 
+	"github.com/netbill/eventbox"
 	"github.com/netbill/pgdbx"
 )
 
@@ -10,7 +11,7 @@ type InboxCleaner struct {
 	box inbox
 }
 
-func NewInboxCleaner(db *pgdbx.DB) *InboxCleaner {
+func NewInboxCleaner(db *pgdbx.DB) eventbox.InboxCleaner {
 	return &InboxCleaner{
 		box: inbox{db: db},
 	}

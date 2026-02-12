@@ -1,4 +1,4 @@
-module github.com/netbill/msnger
+module github.com/netbill/eventbox
 
 go 1.25.6
 

@@ -1,15 +1,13 @@
 package logfields
 
 import (
+	"github.com/netbill/eventbox"
+	"github.com/netbill/eventbox/headers"
 	"github.com/netbill/logium"
-	"github.com/netbill/msnger"
-	"github.com/netbill/msnger/headers"
 	"github.com/segmentio/kafka-go"
 )
 
 const (
-	ProcessID = "process_id"
-
 	EventIDFiled       = "event_id"
 	EventTypeFiled     = "event_type"
 	EventTopicFiled    = "event_topic"
@@ -22,7 +20,6 @@ func FromHeader(hs headers.MessageRequiredHeaders) logium.Fields {
 	return map[string]any{
 		EventIDFiled:       hs.EventID,
 		EventTypeFiled:     hs.EventType,
-		EventVersionFiled:  hs.EventVersion,
 		EventProducerFiled: hs.Producer,
 	}
 }
@@ -36,7 +33,6 @@ func FromMessage(m kafka.Message) logium.Fields {
 	if err != nil {
 		res[EventTopicFiled] = "unknown"
 		res[EventTypeFiled] = "unknown"
-		res[EventVersionFiled] = "unknown"
 		res[EventProducerFiled] = "unknown"
 
 		return res
@@ -49,7 +45,7 @@ func FromMessage(m kafka.Message) logium.Fields {
 	return res
 }
 
-func FromInboxEvent(ev msnger.InboxEvent) logium.Fields {
+func FromInboxEvent(ev eventbox.InboxEvent) logium.Fields {
 	return map[string]any{
 		EventIDFiled:       ev.EventID,
 		EventTopicFiled:    ev.Topic,
@@ -60,7 +56,7 @@ func FromInboxEvent(ev msnger.InboxEvent) logium.Fields {
 	}
 }
 
-func FromOutboxEvent(ev msnger.OutboxEvent) logium.Fields {
+func FromOutboxEvent(ev eventbox.OutboxEvent) logium.Fields {
 	return map[string]any{
 		EventIDFiled:       ev.EventID,
 		EventTopicFiled:    ev.Topic,

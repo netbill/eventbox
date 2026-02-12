@@ -69,7 +69,7 @@ picked AS (
     LIMIT sqlc.arg(batch_limit)
 )
 UPDATE inbox_events e
-SET reserved_by = sqlc.arg(process_id),
+SET reserved_by = sqlc.arg(worker_id),
     status      = 'processing'
 WHERE e.event_id IN (SELECT event_id FROM picked)
 RETURNING *;
@@ -85,7 +85,7 @@ SET
     last_error = NULL
 WHERE event_id = ANY(sqlc.arg(event_id)::uuid)
     AND status = 'processing'
-    AND reserved_by = sqlc.arg(process_id)
+    AND reserved_by = sqlc.arg(worker_id)
 RETURNING *;
 
 -- name: MarkInboxEventAsPending :one
@@ -99,7 +99,7 @@ SET
     last_error = sqlc.arg(last_error)
 WHERE event_id = (sqlc.arg(event_id)::uuid)
     AND status = 'processing'
-    AND reserved_by = sqlc.arg(process_id)
+    AND reserved_by = sqlc.arg(worker_id)
 RETURNING *;
 
 -- name: MarkInboxEventAsFailed :one
@@ -112,7 +112,7 @@ SET
     last_error = sqlc.arg(last_error)
 WHERE event_id = ANY(sqlc.arg(event_id)::uuid)
     AND status = 'processing'
-    AND reserved_by = sqlc.arg(process_id)
+    AND reserved_by = sqlc.arg(worker_id)
 RETURNING *;
 
 -- name: CleanProcessingInboxEvents :exec
@@ -130,7 +130,7 @@ SET
     reserved_by = NULL,
     next_attempt_at = (now() AT TIME ZONE 'UTC')
 WHERE status = 'processing'
-    AND reserved_by = ANY(sqlc.arg(process_ids)::text[]);
+    AND reserved_by = ANY(sqlc.arg(worker_ids)::text[]);
 
 -- name: CleanFailedInboxEvents :exec
 UPDATE inbox_events

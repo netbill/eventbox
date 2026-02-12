@@ -49,8 +49,8 @@ WHERE status = 'processing'
   AND reserved_by = ANY($1::text[])
 `
 
-func (q *Queries) CleanReservedProcessingOutboxEvents(ctx context.Context, processIds []string) error {
-	_, err := q.db.Exec(ctx, cleanReservedProcessingOutboxEvents, processIds)
+func (q *Queries) CleanReservedProcessingOutboxEvents(ctx context.Context, workerIds []string) error {
+	_, err := q.db.Exec(ctx, cleanReservedProcessingOutboxEvents, workerIds)
 	return err
 }
 
@@ -172,13 +172,13 @@ WHERE e.event_id = inp.event_id
 `
 
 type MarkOutboxEventsAsFailedParams struct {
-	ProcessID  pgtype.Text
+	WorkerID   pgtype.Text
 	EventIds   []pgtype.UUID
 	LastErrors []string
 }
 
 func (q *Queries) MarkOutboxEventsAsFailed(ctx context.Context, arg MarkOutboxEventsAsFailedParams) error {
-	_, err := q.db.Exec(ctx, markOutboxEventsAsFailed, arg.ProcessID, arg.EventIds, arg.LastErrors)
+	_, err := q.db.Exec(ctx, markOutboxEventsAsFailed, arg.WorkerID, arg.EventIds, arg.LastErrors)
 	return err
 }
 
@@ -207,7 +207,7 @@ WHERE e.event_id = inp.event_id
 `
 
 type MarkOutboxEventsAsPendingParams struct {
-	ProcessID      pgtype.Text
+	WorkerID       pgtype.Text
 	EventIds       []pgtype.UUID
 	LastAttemptAts []pgtype.Timestamptz
 	NextAttemptAts []pgtype.Timestamptz
@@ -216,7 +216,7 @@ type MarkOutboxEventsAsPendingParams struct {
 
 func (q *Queries) MarkOutboxEventsAsPending(ctx context.Context, arg MarkOutboxEventsAsPendingParams) error {
 	_, err := q.db.Exec(ctx, markOutboxEventsAsPending,
-		arg.ProcessID,
+		arg.WorkerID,
 		arg.EventIds,
 		arg.LastAttemptAts,
 		arg.NextAttemptAts,
@@ -244,13 +244,13 @@ WHERE e.event_id = inp.event_id
 `
 
 type MarkOutboxEventsAsSentParams struct {
-	ProcessID pgtype.Text
-	EventIds  []pgtype.UUID
-	SentAts   []pgtype.Timestamptz
+	WorkerID pgtype.Text
+	EventIds []pgtype.UUID
+	SentAts  []pgtype.Timestamptz
 }
 
 func (q *Queries) MarkOutboxEventsAsSent(ctx context.Context, arg MarkOutboxEventsAsSentParams) error {
-	_, err := q.db.Exec(ctx, markOutboxEventsAsSent, arg.ProcessID, arg.EventIds, arg.SentAts)
+	_, err := q.db.Exec(ctx, markOutboxEventsAsSent, arg.WorkerID, arg.EventIds, arg.SentAts)
 	return err
 }
 
@@ -300,13 +300,13 @@ RETURNING event_id, seq, topic, key, type, version, producer, payload, reserved_
 `
 
 type ReserveOutboxEventsParams struct {
-	ProcessID  pgtype.Text
+	WorkerID   pgtype.Text
 	SortLimit  int32
 	BatchLimit int32
 }
 
 func (q *Queries) ReserveOutboxEvents(ctx context.Context, arg ReserveOutboxEventsParams) ([]OutboxEvent, error) {
-	rows, err := q.db.Query(ctx, reserveOutboxEvents, arg.ProcessID, arg.SortLimit, arg.BatchLimit)
+	rows, err := q.db.Query(ctx, reserveOutboxEvents, arg.WorkerID, arg.SortLimit, arg.BatchLimit)
 	if err != nil {
 		return nil, err
 	}

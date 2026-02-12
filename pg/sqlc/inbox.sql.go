@@ -49,8 +49,8 @@ WHERE status = 'processing'
     AND reserved_by = ANY($1::text[])
 `
 
-func (q *Queries) CleanReservedProcessingInboxEvents(ctx context.Context, processIds []string) error {
-	_, err := q.db.Exec(ctx, cleanReservedProcessingInboxEvents, processIds)
+func (q *Queries) CleanReservedProcessingInboxEvents(ctx context.Context, workerIds []string) error {
+	_, err := q.db.Exec(ctx, cleanReservedProcessingInboxEvents, workerIds)
 	return err
 }
 
@@ -186,11 +186,11 @@ RETURNING event_id, seq, topic, key, type, version, producer, payload, partition
 type MarkInboxEventAsFailedParams struct {
 	LastError pgtype.Text
 	EventID   pgtype.UUID
-	ProcessID pgtype.Text
+	WorkerID  pgtype.Text
 }
 
 func (q *Queries) MarkInboxEventAsFailed(ctx context.Context, arg MarkInboxEventAsFailedParams) (InboxEvent, error) {
-	row := q.db.QueryRow(ctx, markInboxEventAsFailed, arg.LastError, arg.EventID, arg.ProcessID)
+	row := q.db.QueryRow(ctx, markInboxEventAsFailed, arg.LastError, arg.EventID, arg.WorkerID)
 	var i InboxEvent
 	err := row.Scan(
 		&i.EventID,
@@ -235,7 +235,7 @@ type MarkInboxEventAsPendingParams struct {
 	NextAttemptAt pgtype.Timestamptz
 	LastError     pgtype.Text
 	EventID       pgtype.UUID
-	ProcessID     pgtype.Text
+	WorkerID      pgtype.Text
 }
 
 func (q *Queries) MarkInboxEventAsPending(ctx context.Context, arg MarkInboxEventAsPendingParams) (InboxEvent, error) {
@@ -243,7 +243,7 @@ func (q *Queries) MarkInboxEventAsPending(ctx context.Context, arg MarkInboxEven
 		arg.NextAttemptAt,
 		arg.LastError,
 		arg.EventID,
-		arg.ProcessID,
+		arg.WorkerID,
 	)
 	var i InboxEvent
 	err := row.Scan(
@@ -286,12 +286,12 @@ RETURNING event_id, seq, topic, key, type, version, producer, payload, partition
 `
 
 type MarkInboxEventAsProcessedParams struct {
-	EventID   pgtype.UUID
-	ProcessID pgtype.Text
+	EventID  pgtype.UUID
+	WorkerID pgtype.Text
 }
 
 func (q *Queries) MarkInboxEventAsProcessed(ctx context.Context, arg MarkInboxEventAsProcessedParams) (InboxEvent, error) {
-	row := q.db.QueryRow(ctx, markInboxEventAsProcessed, arg.EventID, arg.ProcessID)
+	row := q.db.QueryRow(ctx, markInboxEventAsProcessed, arg.EventID, arg.WorkerID)
 	var i InboxEvent
 	err := row.Scan(
 		&i.EventID,
@@ -366,13 +366,13 @@ RETURNING event_id, seq, topic, key, type, version, producer, payload, partition
 `
 
 type ReserveInboxEventsParams struct {
-	ProcessID  pgtype.Text
+	WorkerID   pgtype.Text
 	SortLimit  int32
 	BatchLimit int32
 }
 
 func (q *Queries) ReserveInboxEvents(ctx context.Context, arg ReserveInboxEventsParams) ([]InboxEvent, error) {
-	rows, err := q.db.Query(ctx, reserveInboxEvents, arg.ProcessID, arg.SortLimit, arg.BatchLimit)
+	rows, err := q.db.Query(ctx, reserveInboxEvents, arg.WorkerID, arg.SortLimit, arg.BatchLimit)
 	if err != nil {
 		return nil, err
 	}

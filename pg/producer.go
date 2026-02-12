@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
-	"github.com/netbill/msnger"
+	"github.com/netbill/eventbox"
 	"github.com/netbill/pgdbx"
 	"github.com/segmentio/kafka-go"
 )
@@ -18,7 +18,7 @@ type producer struct {
 func NewProducer(
 	writer *kafka.Writer,
 	db *pgdbx.DB,
-) msnger.Producer {
+) eventbox.Producer {
 	p := &producer{
 		writer: writer,
 		outbox: outbox{db: db},

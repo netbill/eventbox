@@ -1,11 +1,11 @@
-package msnger
+package eventbox
 
 import (
 	"strconv"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/netbill/msnger/headers"
+	"github.com/netbill/eventbox/headers"
 	"github.com/segmentio/kafka-go"
 )
 

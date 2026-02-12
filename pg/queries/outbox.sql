@@ -61,7 +61,7 @@ picked AS (
     LIMIT sqlc.arg(batch_limit)
 )
 UPDATE outbox_events e
-SET reserved_by = sqlc.arg(process_id),
+SET reserved_by = sqlc.arg(worker_id),
     status      = 'processing'
 WHERE e.event_id IN (SELECT event_id FROM picked)
 RETURNING *;
@@ -81,7 +81,7 @@ SET status          = 'sent',
     FROM inp
 WHERE e.event_id = inp.event_id
     AND e.status = 'processing'
-    AND e.reserved_by = sqlc.arg(process_id);
+    AND e.reserved_by = sqlc.arg(worker_id);
 
 -- name: MarkOutboxEventsAsPending :exec
 WITH inp AS (
@@ -104,7 +104,7 @@ SET status          = 'pending',
 FROM inp
 WHERE e.event_id = inp.event_id
     AND e.status = 'processing'
-    AND e.reserved_by = sqlc.arg(process_id);
+    AND e.reserved_by = sqlc.arg(worker_id);
 
 
 -- name: MarkOutboxEventsAsFailed :exec
@@ -123,7 +123,7 @@ SET status          = 'failed',
     FROM inp
 WHERE e.event_id = inp.event_id
     AND e.status = 'processing'
-    AND e.reserved_by = sqlc.arg(process_id);
+    AND e.reserved_by = sqlc.arg(worker_id);
 
 -- name: CleanProcessingOutboxEvents :exec
 UPDATE outbox_events
@@ -140,7 +140,7 @@ SET
     reserved_by = NULL,
     next_attempt_at = (now() AT TIME ZONE 'UTC')
 WHERE status = 'processing'
-  AND reserved_by = ANY(sqlc.arg(process_ids)::text[]);
+  AND reserved_by = ANY(sqlc.arg(worker_ids)::text[]);
 
 -- name: CleanFailedOutboxEvents :exec
 UPDATE outbox_events

@@ -6,8 +6,9 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/netbill/eventbox"
+	"github.com/netbill/eventbox/logfields"
 	"github.com/netbill/logium"
-	"github.com/netbill/msnger/logfields"
 	"github.com/netbill/pgdbx"
 	"github.com/segmentio/kafka-go"
 )
@@ -38,7 +39,7 @@ func NewConsumer(
 	log *logium.Entry,
 	db *pgdbx.DB,
 	config ConsumerConfig,
-) *Consumer {
+) eventbox.Consumer {
 	if config.MinBackoff <= 0 {
 		config.MinBackoff = DefaultMinConsumerBackoff
 	}

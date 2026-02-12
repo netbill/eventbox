@@ -10,9 +10,9 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/netbill/ape"
-	"github.com/netbill/msnger"
-	"github.com/netbill/msnger/headers"
-	"github.com/netbill/msnger/pg/sqlc"
+	"github.com/netbill/eventbox"
+	"github.com/netbill/eventbox/headers"
+	"github.com/netbill/eventbox/pg/sqlc"
 	"github.com/netbill/pgdbx"
 	"github.com/segmentio/kafka-go"
 )
@@ -36,10 +36,10 @@ func (i *inbox) queries() *sqlc.Queries {
 func (i *inbox) WriteInboxEvent(
 	ctx context.Context,
 	message kafka.Message,
-) (msnger.InboxEvent, error) {
+) (eventbox.InboxEvent, error) {
 	h, err := headers.ParseMessageRequiredHeaders(message.Headers)
 	if err != nil {
-		return msnger.InboxEvent{}, err
+		return eventbox.InboxEvent{}, err
 	}
 
 	row, err := i.queries().InsertInboxEvent(ctx, sqlc.InsertInboxEventParams{
@@ -54,17 +54,17 @@ func (i *inbox) WriteInboxEvent(
 		Partition:   int32(message.Partition),
 		KafkaOffset: message.Offset,
 
-		Status:        msnger.InboxEventStatusPending,
+		Status:        eventbox.InboxEventStatusPending,
 		Attempts:      0,
 		NextAttemptAt: pgtype.Timestamptz{Time: time.Now().UTC(), Valid: true},
 		ProducedAt:    pgtype.Timestamptz{Time: message.Time, Valid: true},
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return msnger.InboxEvent{}, ErrInboxEventAlreadyExists.Raise(err)
+			return eventbox.InboxEvent{}, ErrInboxEventAlreadyExists.Raise(err)
 		}
 
-		return msnger.InboxEvent{}, fmt.Errorf("insert inbox event: %w", err)
+		return eventbox.InboxEvent{}, fmt.Errorf("insert inbox event: %w", err)
 	}
 
 	return parseInboxEventFromSqlcRow(row), nil
@@ -74,13 +74,13 @@ func (i *inbox) WriteInboxEvent(
 func (i *inbox) GetInboxEventByID(
 	ctx context.Context,
 	id uuid.UUID,
-) (msnger.InboxEvent, error) {
+) (eventbox.InboxEvent, error) {
 	res, err := i.queries().GetInboxEventByID(ctx, pgtype.UUID{Bytes: id, Valid: true})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return msnger.InboxEvent{}, ErrInboxEventNotFound.Raise(err)
+			return eventbox.InboxEvent{}, ErrInboxEventNotFound.Raise(err)
 		}
-		return msnger.InboxEvent{}, fmt.Errorf("get inbox event by id: %w", err)
+		return eventbox.InboxEvent{}, fmt.Errorf("get inbox event by id: %w", err)
 	}
 
 	return parseInboxEventFromSqlcRow(res), nil
@@ -96,11 +96,11 @@ func (i *inbox) GetInboxEventByID(
 // because it can cause deadlocks between processors
 func (i *inbox) ReserveInboxEvents(
 	ctx context.Context,
-	processID string,
+	workerID string,
 	limit int,
-) ([]msnger.InboxEvent, error) {
+) ([]eventbox.InboxEvent, error) {
 	res, err := i.queries().ReserveInboxEvents(ctx, sqlc.ReserveInboxEventsParams{
-		ProcessID:  pgtype.Text{String: processID, Valid: true},
+		WorkerID:   pgtype.Text{String: workerID, Valid: true},
 		BatchLimit: int32(limit),
 		SortLimit:  int32(limit*10 + 100),
 	})
@@ -108,7 +108,7 @@ func (i *inbox) ReserveInboxEvents(
 		return nil, fmt.Errorf("reserve inbox events: %w", err)
 	}
 
-	out := make([]msnger.InboxEvent, len(res))
+	out := make([]eventbox.InboxEvent, len(res))
 	for i := range res {
 		out[i] = parseInboxEventFromSqlcRow(res[i])
 	}
@@ -120,15 +120,15 @@ func (i *inbox) ReserveInboxEvents(
 // It updates the event's status to processed and sets the processed timestamp.
 func (i *inbox) CommitInboxEvent(
 	ctx context.Context,
-	processID string,
+	workerID string,
 	eventID uuid.UUID,
-) (msnger.InboxEvent, error) {
+) (eventbox.InboxEvent, error) {
 	res, err := i.queries().MarkInboxEventAsProcessed(ctx, sqlc.MarkInboxEventAsProcessedParams{
-		ProcessID: pgtype.Text{String: processID, Valid: true},
-		EventID:   pgtype.UUID{Bytes: eventID, Valid: true},
+		WorkerID: pgtype.Text{String: workerID, Valid: true},
+		EventID:  pgtype.UUID{Bytes: eventID, Valid: true},
 	})
 	if err != nil {
-		return msnger.InboxEvent{}, fmt.Errorf("mark inbox event as processed: %w", err)
+		return eventbox.InboxEvent{}, fmt.Errorf("mark inbox event as processed: %w", err)
 	}
 
 	return parseInboxEventFromSqlcRow(res), nil
@@ -138,13 +138,13 @@ func (i *inbox) CommitInboxEvent(
 // It updates the event's status to pending, sets the last error reason, and schedules the next attempt timestamp.
 func (i *inbox) DelayInboxEvent(
 	ctx context.Context,
-	processID string,
+	workerID string,
 	eventID uuid.UUID,
 	reason string,
 	nextAttemptAt time.Time,
-) (msnger.InboxEvent, error) {
+) (eventbox.InboxEvent, error) {
 	res, err := i.queries().MarkInboxEventAsPending(ctx, sqlc.MarkInboxEventAsPendingParams{
-		ProcessID: pgtype.Text{String: processID, Valid: true},
+		WorkerID:  pgtype.Text{String: workerID, Valid: true},
 		EventID:   pgtype.UUID{Bytes: eventID, Valid: true},
 		LastError: pgtype.Text{String: reason, Valid: true},
 		NextAttemptAt: pgtype.Timestamptz{
@@ -153,7 +153,7 @@ func (i *inbox) DelayInboxEvent(
 		},
 	})
 	if err != nil {
-		return msnger.InboxEvent{}, fmt.Errorf("mark inbox event as pending: %w", err)
+		return eventbox.InboxEvent{}, fmt.Errorf("mark inbox event as pending: %w", err)
 	}
 
 	return parseInboxEventFromSqlcRow(res), nil
@@ -163,31 +163,31 @@ func (i *inbox) DelayInboxEvent(
 // It updates the event's status to failed and sets the last error reason.
 func (i *inbox) FailedInboxEvent(
 	ctx context.Context,
-	processID string,
+	workerID string,
 	eventID uuid.UUID,
 	reason string,
-) (msnger.InboxEvent, error) {
+) (eventbox.InboxEvent, error) {
 	res, err := i.queries().MarkInboxEventAsFailed(ctx, sqlc.MarkInboxEventAsFailedParams{
-		ProcessID: pgtype.Text{String: processID, Valid: true},
+		WorkerID:  pgtype.Text{String: workerID, Valid: true},
 		EventID:   pgtype.UUID{Bytes: eventID, Valid: true},
 		LastError: pgtype.Text{String: reason, Valid: true},
 	})
 	if err != nil {
-		return msnger.InboxEvent{}, fmt.Errorf("mark inbox event as failed: %w", err)
+		return eventbox.InboxEvent{}, fmt.Errorf("mark inbox event as failed: %w", err)
 	}
 
 	return parseInboxEventFromSqlcRow(res), nil
 }
 
 // CleanProcessingInboxEvents removes all inbox events that are currently marked as processing.
-func (i *inbox) CleanProcessingInboxEvents(ctx context.Context, processIDs ...string) error {
-	if len(processIDs) == 0 {
+func (i *inbox) CleanProcessingInboxEvents(ctx context.Context, workerIDs ...string) error {
+	if len(workerIDs) == 0 {
 		err := i.queries().CleanProcessingInboxEvents(ctx)
 		if err != nil {
 			return fmt.Errorf("clean processing inbox events: %w", err)
 		}
 	} else {
-		err := i.queries().CleanReservedProcessingInboxEvents(ctx, processIDs)
+		err := i.queries().CleanReservedProcessingInboxEvents(ctx, workerIDs)
 		if err != nil {
 			return fmt.Errorf("clean processing inbox events for processor: %w", err)
 		}
@@ -210,8 +210,8 @@ func (i *inbox) Transaction(ctx context.Context, fn func(ctx context.Context) er
 	return i.db.Transaction(ctx, fn)
 }
 
-func parseInboxEventFromSqlcRow(row sqlc.InboxEvent) msnger.InboxEvent {
-	event := msnger.InboxEvent{
+func parseInboxEventFromSqlcRow(row sqlc.InboxEvent) eventbox.InboxEvent {
+	event := eventbox.InboxEvent{
 		EventID: row.EventID.Bytes,
 		Seq:     row.Seq,
 

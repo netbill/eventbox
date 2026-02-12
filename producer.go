@@ -1,4 +1,4 @@
-package msnger
+package eventbox
 
 import (
 	"context"
