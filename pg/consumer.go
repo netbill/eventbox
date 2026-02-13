@@ -60,7 +60,12 @@ func NewConsumer(
 // Read starts the consumer loop that reads messages from Kafka, writes them to the inbox, and commits them.
 func (c *Consumer) Read(ctx context.Context, reader *kafka.Reader) {
 	backoff := c.config.MinBackoff
+
 	for {
+		if ctx.Err() != nil {
+			return
+		}
+
 		m, err := c.fetchMessage(ctx, reader)
 		if err != nil {
 			if !c.backoffOrStop(ctx, &backoff) {
