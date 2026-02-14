@@ -95,16 +95,17 @@ func (c *Consumer) Read(ctx context.Context, reader *kafka.Reader) {
 // fetchMessage attempts to fetch a message from the Kafka reader.
 // It logs and returns an error if fetching fails.
 func (c *Consumer) fetchMessage(ctx context.Context, r *kafka.Reader) (kafka.Message, error) {
+	log := c.log.WithField(logfields.EventTopicFiled, r.Config().Topic)
+
 	m, err := r.FetchMessage(ctx)
 	switch {
 	case ctx.Err() != nil:
 		return kafka.Message{}, ctx.Err()
 	case err != nil:
-		c.log.WithError(err).
-			WithField(logfields.EventTopicFiled, r.Config().Topic).
-			Errorf("failed to fetch message from Kafka")
+		log.WithError(err).Errorf("failed to fetch message from Kafka")
 		return kafka.Message{}, fmt.Errorf("fetch message: %w", err)
 	default:
+		log.WithFields(logfields.FromMessage(m)).Debug("message fetched from Kafka")
 		return m, nil
 	}
 }
@@ -112,17 +113,20 @@ func (c *Consumer) fetchMessage(ctx context.Context, r *kafka.Reader) (kafka.Mes
 // writeInbox attempts to write the fetched message to the inbox.
 // It handles the case where the inbox event already exists and logs appropriately.
 func (c *Consumer) writeInbox(ctx context.Context, m kafka.Message) error {
+	log := c.log.WithFields(logfields.FromMessage(m))
+
 	_, err := c.inbox.WriteInboxEvent(ctx, m)
 	switch {
 	case ctx.Err() != nil:
 		return ctx.Err()
 	case errors.Is(err, ErrInboxEventAlreadyExists):
-		c.log.WithFields(logfields.FromMessage(m)).Info("inbox event already exists")
+		log.Info("inbox event already exists")
 		return nil
 	case err != nil:
-		c.log.WithError(err).WithFields(logfields.FromMessage(m)).Errorf("failed to write inbox event")
+		log.WithError(err).Errorf("failed to write inbox event")
 		return fmt.Errorf("write inbox event: %w", err)
 	default:
+		log.Debug("inbox event written successfully")
 		return nil
 	}
 }
@@ -130,14 +134,17 @@ func (c *Consumer) writeInbox(ctx context.Context, m kafka.Message) error {
 // commitMessage attempts to commit the processed message in Kafka.
 // It logs and returns an error if committing fails.
 func (c *Consumer) commitMessage(ctx context.Context, r *kafka.Reader, m kafka.Message) error {
+	log := c.log.WithFields(logfields.FromMessage(m))
+
 	err := r.CommitMessages(ctx, m)
 	switch {
 	case ctx.Err() != nil:
 		return ctx.Err()
 	case err != nil:
-		c.log.WithError(err).WithFields(logfields.FromMessage(m)).Errorf("failed to commit message in Kafka")
+		log.WithError(err).Errorf("failed to commit message in Kafka")
 		return fmt.Errorf("commit message: %w", err)
 	default:
+		log.Debug("message committed in Kafka successfully")
 		return nil
 	}
 }

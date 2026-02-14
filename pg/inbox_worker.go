@@ -58,8 +58,8 @@ type InboxWorker struct {
 	log *logium.Entry
 
 	box    inbox
-	route  map[string]eventbox.InboxHandlerFunc
 	config InboxWorkerConfig
+	route  map[string]eventbox.InboxHandlerFunc
 }
 
 // NewInboxWorker creates a new InboxWorker.
@@ -225,47 +225,42 @@ func (w *InboxWorker) handleLoop(
 	for job := range jobs {
 		event := job.event
 
-		err := w.box.Transaction(ctx, func(ctx context.Context) error {
-			var err error
+		log := w.log.WithFields(logfields.FromInboxEvent(event))
 
-			hErr := w.handleEvent(ctx, event)
-			if hErr != nil {
-				switch {
-				case w.config.MaxAttempts != 0 && event.Attempts >= w.config.MaxAttempts:
-					event, err = w.box.FailedInboxEvent(ctx, w.id, event.EventID, hErr.Error())
-					if err != nil {
-						return err
-					}
-
-					return nil
-				default:
-					event, err = w.box.DelayInboxEvent(ctx, w.id, event.EventID, hErr.Error(), w.nextAttemptAt(event.Attempts))
-					if err != nil {
-						return err
-					}
-
-					return nil
-				}
-			}
-
-			event, err = w.box.CommitInboxEvent(ctx, w.id, event.EventID)
+		herr := w.handleEvent(ctx, event)
+		switch {
+		case ctx.Err() != nil:
+			return
+		case herr != nil && event.Attempts+1 >= w.config.MaxAttempts && w.config.MaxAttempts != 0:
+			ev, err := w.box.FailedInboxEvent(ctx, w.id, event.EventID, herr.Error())
 			if err != nil {
-				return err
+				log.WithError(err).Error("failed to mark inbox event as failed")
+				break
 			}
 
-			return nil
-		})
-		if err != nil {
-			w.log.WithError(err).
-				WithFields(logfields.FromInboxEvent(event)).
-				Error("failed to process inbox event")
+			log.WithError(herr).WithFields(logfields.FromInboxEvent(ev)).
+				Error("inbox event marked as failed due to max attempts reached")
+		case herr != nil:
+			ev, err := w.box.DelayInboxEvent(ctx, w.id, event.EventID, herr.Error(), w.nextAttemptAt(event.Attempts+1))
+			if err != nil {
+				log.WithError(err).Error("failed to delay inbox event")
+				break
+			}
+
+			log.WithError(herr).WithFields(logfields.FromInboxEvent(ev)).
+				Warn("failed to mark inbox event as delayed ")
+		default:
+			ev, err := w.box.CommitInboxEvent(ctx, w.id, event.EventID)
+			if err != nil {
+				log.WithError(err).Error("failed to commit inbox event")
+				break
+			}
+
+			log.WithFields(logfields.FromInboxEvent(ev)).
+				Debug("inbox event handled successfully")
 		}
 
 		giveSlot(ctx, slots)
-
-		if ctx.Err() != nil {
-			return
-		}
 	}
 }
 

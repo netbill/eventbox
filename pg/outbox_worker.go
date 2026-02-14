@@ -185,25 +185,26 @@ func (w *OutboxWorker) sendLoop(
 		outboxEvent := job.event
 		msg := outboxEvent.ToKafkaMessage()
 
+		entry := w.log.WithFields(logfields.FromOutboxEvent(outboxEvent))
+
 		err := w.writer.WriteMessages(ctx, msg)
 		if err != nil {
-			w.log.WithError(err).
-				WithFields(logfields.FromOutboxEvent(outboxEvent)).
-				Errorf("failed to send outbox event to Kafka")
+			entry.WithError(err).Error("failed to send outbox event")
 
 			_ = sendOutboxResult(ctx, results, outboxWorkerRes{
 				event:       outboxEvent,
 				err:         err,
 				processedAt: time.Now().UTC(),
 			})
-			continue
-		}
+		} else {
+			entry.Debug("outbox event sent successfully")
 
-		_ = sendOutboxResult(ctx, results, outboxWorkerRes{
-			event:       outboxEvent,
-			err:         nil,
-			processedAt: time.Now().UTC(),
-		})
+			_ = sendOutboxResult(ctx, results, outboxWorkerRes{
+				event:       outboxEvent,
+				err:         nil,
+				processedAt: time.Now().UTC(),
+			})
+		}
 	}
 }
 
@@ -248,17 +249,15 @@ func (w *OutboxWorker) processBatch(
 					Reason:        r.err.Error(),
 				}
 
-				entry.Errorf("event marked as failed after reaching max attempts")
-				continue
-			}
+				entry.Error("event marked as failed after reaching max attempts")
+			} else {
+				pending[r.event.EventID] = DelayOutboxEventData{
+					NextAttemptAt: w.nextAttemptAt(r.event.Attempts + 1),
+					Reason:        r.err.Error(),
+				}
 
-			pending[r.event.EventID] = DelayOutboxEventData{
-				NextAttemptAt: w.nextAttemptAt(r.event.Attempts + 1),
-				Reason:        r.err.Error(),
+				entry.Warn("event will be delayed for future processing after failed attempt")
 			}
-
-			entry.Warnf("event will be delayed for future processing after failed attempt")
-			continue
 		}
 
 		commit[r.event.EventID] = CommitOutboxEventParams{SentAt: r.processedAt}
@@ -268,18 +267,24 @@ func (w *OutboxWorker) processBatch(
 		if err = w.box.CommitOutboxEvents(ctx, w.id, commit); err != nil {
 			w.log.WithError(err).Error("failed to mark events as sent")
 		}
+
+		w.log.WithField("count", len(commit)).Debug("events marked as sent")
 	}
 
 	if len(pending) > 0 {
 		if err = w.box.DelayOutboxEvents(ctx, w.id, pending); err != nil {
 			w.log.WithError(err).Error("failed to delay events")
 		}
+
+		w.log.WithField("count", len(pending)).Debug("events delayed for future processing")
 	}
 
 	if len(failed) > 0 {
 		if err = w.box.FailedOutboxEvents(ctx, w.id, failed); err != nil {
 			w.log.WithError(err).Error("failed to mark events as failed")
 		}
+
+		w.log.WithField("count", len(failed)).Debug("events marked as failed after reaching max attempts")
 	}
 
 	return len(events)
